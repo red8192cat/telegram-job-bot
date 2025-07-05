@@ -1,3 +1,5 @@
+package com.jobbot.bot
+
 import com.jobbot.data.Database
 import com.jobbot.data.models.NotificationMessage
 import com.jobbot.infrastructure.monitoring.ErrorTracker

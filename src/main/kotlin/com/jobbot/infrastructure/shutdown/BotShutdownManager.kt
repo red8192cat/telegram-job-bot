@@ -1,3 +1,5 @@
+package com.jobbot.infrastructure.shutdown
+
 import com.jobbot.infrastructure.monitoring.ErrorTracker
 import com.jobbot.shared.AdminNotificationManager
 import com.jobbot.shared.getLogger

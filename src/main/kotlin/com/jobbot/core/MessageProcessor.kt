@@ -1,3 +1,5 @@
+package com.jobbot.core
+
 import com.jobbot.data.Database
 import com.jobbot.data.models.*
 import com.jobbot.infrastructure.monitoring.SystemMonitor

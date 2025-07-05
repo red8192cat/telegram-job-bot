@@ -1,3 +1,5 @@
+package com.jobbot.shared
+
 import io.github.oshai.kotlinlogging.KotlinLogging
 
 // Logging utility

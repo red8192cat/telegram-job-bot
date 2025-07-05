@@ -1,3 +1,5 @@
+package com.jobbot.bot.tdlib
+
 import com.jobbot.bot.TelegramBot
 import com.jobbot.core.MessageProcessor
 import com.jobbot.data.Database

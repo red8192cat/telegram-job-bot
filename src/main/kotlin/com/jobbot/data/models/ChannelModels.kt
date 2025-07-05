@@ -1,3 +1,5 @@
+package com.jobbot.data.models
+
 import java.time.LocalDateTime
 
 // Channel-related data classes

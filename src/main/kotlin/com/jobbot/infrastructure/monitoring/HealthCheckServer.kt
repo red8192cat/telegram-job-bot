@@ -1,3 +1,5 @@
+package com.jobbot.infrastructure.monitoring
+
 import com.jobbot.bot.tdlib.TelegramUser
 import com.jobbot.data.Database
 import com.jobbot.shared.getLogger

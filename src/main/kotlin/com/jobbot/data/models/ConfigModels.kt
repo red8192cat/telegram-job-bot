@@ -1,3 +1,5 @@
+package com.jobbot.data.models
+
 // Configuration models
 data class BotConfig(
     val botToken: String,

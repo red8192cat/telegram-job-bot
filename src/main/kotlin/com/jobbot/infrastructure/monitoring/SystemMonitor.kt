@@ -1,3 +1,5 @@
+package com.jobbot.infrastructure.monitoring
+
 import com.jobbot.data.models.SystemHealth
 import com.jobbot.shared.utils.TextUtils
 import java.time.LocalDateTime

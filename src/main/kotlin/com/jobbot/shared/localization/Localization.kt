@@ -1,3 +1,5 @@
+package com.jobbot.shared.localization
+
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.text.MessageFormat
 import java.util.*

@@ -1,3 +1,5 @@
+package com.jobbot.data.repositories
+
 import com.jobbot.data.models.*
 import com.jobbot.shared.getLogger
 import java.sql.Connection

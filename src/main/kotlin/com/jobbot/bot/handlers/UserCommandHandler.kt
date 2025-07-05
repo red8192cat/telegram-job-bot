@@ -1,3 +1,5 @@
+package com.jobbot.bot.handlers
+
 import com.jobbot.data.Database
 import com.jobbot.data.models.User
 import com.jobbot.infrastructure.security.RateLimiter

@@ -1,3 +1,5 @@
+package com.jobbot.data
+
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import com.jobbot.data.repositories.UserRepository

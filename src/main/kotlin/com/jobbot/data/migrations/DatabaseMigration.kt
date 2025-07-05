@@ -1,3 +1,5 @@
+package com.jobbot.data.migrations
+
 import java.sql.Connection
 
 class DatabaseMigration(private val logger: io.github.oshai.kotlinlogging.KLogger) {

@@ -1,3 +1,5 @@
+package com.jobbot.data.repositories
+
 import com.jobbot.data.models.Channel
 import com.jobbot.data.models.ChannelDetails
 import com.jobbot.shared.getLogger

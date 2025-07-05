@@ -1,3 +1,5 @@
+package com.jobbot.shared.utils
+
 // Validation utilities
 object ValidationUtils {
     fun isValidTelegramId(id: String): Boolean {

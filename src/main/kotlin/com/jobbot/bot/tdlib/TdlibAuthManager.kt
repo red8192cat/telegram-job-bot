@@ -1,3 +1,5 @@
+package com.jobbot.bot.tdlib
+
 import com.jobbot.shared.getLogger
 
 /**

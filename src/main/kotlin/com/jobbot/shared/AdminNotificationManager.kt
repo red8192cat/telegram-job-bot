@@ -1,3 +1,5 @@
+package com.jobbot.shared
+
 import com.jobbot.bot.TelegramBot
 import com.jobbot.infrastructure.monitoring.ErrorTracker
 import com.jobbot.shared.getLogger

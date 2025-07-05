@@ -1,3 +1,5 @@
+package com.jobbot.infrastructure.monitoring
+
 import com.jobbot.data.models.ErrorLog
 import com.jobbot.shared.getLogger
 import java.time.LocalDateTime

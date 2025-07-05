@@ -1,3 +1,5 @@
+package com.jobbot.data.repositories
+
 import com.jobbot.data.models.BannedUser
 import com.jobbot.data.models.UserInfo
 import com.jobbot.shared.getLogger

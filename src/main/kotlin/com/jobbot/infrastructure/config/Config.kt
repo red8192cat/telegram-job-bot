@@ -1,3 +1,5 @@
+package com.jobbot.infrastructure.config
+
 import com.jobbot.data.models.BotConfig
 import com.jobbot.shared.getLogger
 import com.jobbot.shared.utils.ValidationUtils

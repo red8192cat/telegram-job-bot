@@ -1,3 +1,5 @@
+package com.jobbot.infrastructure.security
+
 import com.jobbot.data.models.RateLimitState
 import com.jobbot.shared.AdminNotificationManager
 import com.jobbot.shared.getLogger

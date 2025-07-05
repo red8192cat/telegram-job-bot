@@ -1,3 +1,5 @@
+package com.jobbot.bot
+
 import com.jobbot.admin.AdminCommandRouter
 import com.jobbot.bot.handlers.UserCommandHandler
 import com.jobbot.bot.tdlib.TelegramUser

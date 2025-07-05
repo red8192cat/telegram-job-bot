@@ -1,3 +1,5 @@
+package com.jobbot.shared.utils
+
 import java.time.LocalDateTime
 import java.util.regex.Pattern
 
