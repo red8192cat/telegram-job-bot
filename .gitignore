@@ -1,0 +1,244 @@
+# Telegram Job Bot - .gitignore
+
+# =====================================================
+# SECRETS AND CONFIGURATION (CRITICAL - NEVER COMMIT)
+# =====================================================
+
+# Bot secrets and credentials (KEEP EXAMPLE, IGNORE REAL)
+bot-secrets.env
+.env
+*.env
+!*.env.example
+
+# Any other secret files
+secrets/
+credentials/
+*.key
+*.pem
+*.p12
+*.jks
+
+# =====================================================
+# BUILD AND COMPILATION
+# =====================================================
+
+# Gradle build files
+.gradle/
+build/
+gradle-app.setting
+!gradle-wrapper.jar
+!gradle-wrapper.properties
+
+# Java/Kotlin compilation
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+!libs/*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# Maven (if ever used)
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# =====================================================
+# RUNTIME DATA AND LOGS
+# =====================================================
+
+# Database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+bot.db*
+
+# Log files
+logs/
+*.log
+*.log.*
+
+# TDLib data
+*_tdlib/
+tdlib_*
+
+# Temporary files
+tmp/
+temp/
+cache/
+
+# =====================================================
+# DEVELOPMENT ENVIRONMENT
+# =====================================================
+
+# IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# Eclipse
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+
+# NetBeans
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# =====================================================
+# OPERATING SYSTEM
+# =====================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.tmp
+*.temp
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# =====================================================
+# DOCKER AND CONTAINERS
+# =====================================================
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+.docker/
+
+# Kubernetes
+*.kubeconfig
+
+# =====================================================
+# NATIVE LIBRARIES AND DEPENDENCIES
+# =====================================================
+
+# Custom TDLib builds (these should be manually managed)
+# Uncomment if you want to ignore them:
+# libs/tdlib-*.jar
+# libs/natives/*.so
+
+# Node.js (if any frontend tools are added)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+
+# =====================================================
+# TESTING AND COVERAGE
+# =====================================================
+
+# Test results
+TEST-*.xml
+test-results/
+coverage/
+*.exec
+
+# JaCoCo
+jacoco.exec
+jacoco-it.exec
+
+# =====================================================
+# BACKUP AND TEMPORARY FILES
+# =====================================================
+
+# Backup files
+*.bak
+*.backup
+*.old
+*.orig
+*.save
+*.swp
+*.swo
+*~
+
+# Archives
+*.7z
+*.dmg
+*.gz
+*.iso
+*.rar
+*.tar
+*.zip
+
+# =====================================================
+# DOCUMENTATION BUILDS
+# =====================================================
+
+# Generated documentation
+docs/build/
+site/
+
+# =====================================================
+# MISC
+# =====================================================
+
+# Thumbnails
+*.thumb
+
+# Package files
+*.deb
+*.rpm
+
+# JVM crash logs
+hs_err_pid*
+replay_pid*

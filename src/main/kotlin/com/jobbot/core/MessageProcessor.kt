@@ -80,20 +80,50 @@ class MessageProcessor(private val database: Database) {
         // Check required OR groups (at least one from each group must be present)
         for (orGroup in keywords.requiredOr) {
             val hasMatch = orGroup.any { keyword ->
-                containsKeyword(normalizedText, keyword)
+                // 🔧 FIXED: Handle AND groups within OR groups (e.g., [java+kotlin / python])
+                if (isRealAndGroup(keyword)) {
+                    // This is an AND group within an OR - all keywords in this item must be present
+                    val andKeywords = smartSplitAndGroup(keyword)
+                    andKeywords.all { andKeyword ->
+                        containsKeyword(normalizedText, andKeyword)
+                    }
+                } else {
+                    // Regular keyword
+                    containsKeyword(normalizedText, keyword)
+                }
             }
             if (!hasMatch) {
                 return MatchResult(isMatch = false)
             }
         }
         
-        // Check AND groups (all keywords in each group must be present)
+        // 🔧 FIXED: Check AND groups and collect successful matches
+        val andGroupMatches = mutableListOf<String>()
         for (andGroup in keywords.andGroups) {
-            val hasAllInGroup = andGroup.all { keyword ->
+            // Check which keywords from this AND group exist in the text
+            val existingKeywords = andGroup.filter { keyword ->
                 containsKeyword(normalizedText, keyword)
             }
-            if (!hasAllInGroup) {
-                return MatchResult(isMatch = false)
+            
+            when {
+                // If NO keywords from the AND group exist, ignore this group (it's optional)
+                existingKeywords.isEmpty() -> {
+                    logger.debug { "AND group [${andGroup.joinToString("+")}] not present - ignoring" }
+                }
+                // If ALL keywords from the AND group exist, count as successful match
+                existingKeywords.size == andGroup.size -> {
+                    logger.debug { "AND group [${andGroup.joinToString("+")}] fully matched" }
+                    andGroupMatches.addAll(existingKeywords)
+                }
+                // If SOME but not ALL keywords exist, this group fails BUT don't block overall match
+                else -> {
+                    logger.debug { 
+                        "AND group [${andGroup.joinToString("+")}] partial match failed: " +
+                        "found ${existingKeywords.joinToString(", ")} " +
+                        "but missing ${(andGroup - existingKeywords.toSet()).joinToString(", ")}"
+                    }
+                    // Don't return false here - just don't count this group as a match
+                }
             }
         }
         
@@ -104,14 +134,14 @@ class MessageProcessor(private val database: Database) {
             phrases = keywords.phrases
         ))
         
-        val hasRequiredMatches = keywords.required.isNotEmpty() || keywords.requiredOr.isNotEmpty() || keywords.andGroups.isNotEmpty()
-        val hasOptionalMatches = optionalMatches.isNotEmpty()
+        val hasRequiredMatches = keywords.required.isNotEmpty() || keywords.requiredOr.isNotEmpty()
+        val hasOptionalMatches = optionalMatches.isNotEmpty() || andGroupMatches.isNotEmpty()
         
         val isMatch = if (hasRequiredMatches) {
             // If we have required keywords, we already passed them, so it's a match
             true
         } else {
-            // If no required keywords, we need at least one optional match
+            // If no required keywords, we need at least one optional match (including AND groups)
             hasOptionalMatches
         }
         
@@ -120,13 +150,14 @@ class MessageProcessor(private val database: Database) {
                 "No match found - Keywords: '$keywordsString', " +
                 "Normalized text: '${TextUtils.truncateText(normalizedText, 100)}', " +
                 "Required matches: ${requiredMatches.size}/${keywords.required.size}, " +
-                "Optional matches: ${optionalMatches.size}"
+                "Optional matches: ${optionalMatches.size}, " +
+                "AND group matches: ${andGroupMatches.size}"
             }
         }
 
         return MatchResult(
             isMatch = isMatch,
-            matchedKeywords = requiredMatches + optionalMatches
+            matchedKeywords = requiredMatches + optionalMatches + andGroupMatches
         )
     }
     
@@ -227,10 +258,15 @@ class MessageProcessor(private val database: Database) {
                     }
                 }
                 
-                // AND groups with +
-                keyword.contains("+") -> {
-                    val andKeywords = keyword.split("+").map { it.trim() }.filter { it.isNotBlank() }
-                    andGroups.add(andKeywords)
+                // 🔧 FIXED: Smart AND group detection (handles c++, remote+, etc.)
+                isRealAndGroup(keyword) -> {
+                    val andKeywords = smartSplitAndGroup(keyword)
+                    if (andKeywords.size >= 2) {
+                        andGroups.add(andKeywords)
+                    } else {
+                        // Not a real AND group, treat as single keyword
+                        categorizeKeyword(keyword, optional, wildcards, phrases)
+                    }
                 }
                 
                 // Phrases with spaces
@@ -239,14 +275,9 @@ class MessageProcessor(private val database: Database) {
                     phrases.add(phraseWords)
                 }
                 
-                // Wildcards
-                keyword.endsWith("*") -> {
-                    wildcards.add(keyword)
-                }
-                
-                // Optional exact keywords
+                // Single keywords (wildcards or exact)
                 else -> {
-                    optional.add(keyword)
+                    categorizeKeyword(keyword, optional, wildcards, phrases)
                 }
             }
         }
@@ -259,5 +290,55 @@ class MessageProcessor(private val database: Database) {
             phrases = phrases,
             andGroups = andGroups
         )
+    }
+    
+    /**
+     * Determines if a keyword is a real AND group or contains + for other reasons
+     */
+    private fun isRealAndGroup(keyword: String): Boolean {
+        if (!keyword.contains("+")) return false
+        
+        // 🔧 Handle programming languages and special cases
+        val specialCases = listOf("c++", "c#", ".net", "f#")
+        if (specialCases.any { keyword.equals(it, ignoreCase = true) }) {
+            return false
+        }
+        
+        // Handle cases ending with + (like remote+)
+        if (keyword.endsWith("+") && !keyword.startsWith("+")) {
+            val withoutTrailing = keyword.dropLast(1)
+            // Only treat as AND group if there are multiple + signs
+            return withoutTrailing.contains("+")
+        }
+        
+        // Check if we get at least 2 valid parts after smart split
+        val parts = smartSplitAndGroup(keyword)
+        return parts.size >= 2
+    }
+    
+    /**
+     * Smart splitting that handles c++, remote+, etc.
+     */
+    private fun smartSplitAndGroup(keyword: String): List<String> {
+        // Handle c++ specially - replace with placeholder during split
+        val cppPlaceholder = "__CPP_PLACEHOLDER__"
+        val processed = keyword.replace(Regex("\\bc\\+\\+\\b", RegexOption.IGNORE_CASE), cppPlaceholder)
+        
+        val parts = processed.split("+")
+            .map { it.replace(cppPlaceholder, "c++") }
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+        
+        return parts
+    }
+    
+    /**
+     * Categorize a single keyword as wildcard or exact
+     */
+    private fun categorizeKeyword(keyword: String, optional: MutableList<String>, wildcards: MutableList<String>, phrases: MutableList<List<String>>) {
+        when {
+            keyword.endsWith("*") -> wildcards.add(keyword)
+            else -> optional.add(keyword)
+        }
     }
 }
