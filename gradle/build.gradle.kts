@@ -21,7 +21,8 @@ repositories {
 sourceSets {
     main {
         kotlin {
-            setSrcDirs(listOf("../src/bot"))
+            // UPDATED: Point to new structure
+            setSrcDirs(listOf("../src/main/kotlin"))
         }
         resources {
             setSrcDirs(listOf("../src/resources"))
@@ -58,7 +59,8 @@ dependencies {
 }
 
 application {
-    mainClass.set("MainKt")
+    // UPDATED: Point to new main class
+    mainClass.set("com.jobbot.ApplicationKt")
 }
 
 tasks.shadowJar {
