@@ -4,7 +4,6 @@ import com.jobbot.bot.TelegramBot
 import com.jobbot.bot.tdlib.TelegramUser
 import com.jobbot.bot.tdlib.TdlibLogManager
 import com.jobbot.core.MessageProcessor
-import com.jobbot.core.NotificationService
 import com.jobbot.data.Database
 import com.jobbot.infrastructure.config.Config
 import com.jobbot.infrastructure.monitoring.ErrorTracker
@@ -43,7 +42,6 @@ class Application {
     // Core components
     private lateinit var database: Database
     private lateinit var messageProcessor: MessageProcessor
-    private lateinit var notificationService: NotificationService
     private lateinit var telegramBotsApplication: TelegramBotsLongPollingApplication
     private lateinit var healthCheckServer: HealthCheckServer
     
@@ -70,7 +68,6 @@ class Application {
         // 3. Initialize core services
         logger.info { "Initializing core services..." }
         messageProcessor = MessageProcessor(database)
-        notificationService = NotificationService()
         
         // 4. Initialize Telegram Bot API for v9.x
         logger.info { "Initializing Telegram Bot API..." }
@@ -83,8 +80,8 @@ class Application {
             initializeBotOnlyMode(config)
         }
         
-        // 6. Wire up notification services
-        setupNotificationServices()
+        // 6. Wire up admin notification service
+        setupAdminNotificationService()
         
         // 7. Set up bot commands menu
         setupBotCommands()
@@ -138,15 +135,13 @@ class Application {
         logger.info { "Bot-only mode initialized successfully" }
     }
     
-    private fun setupNotificationServices() {
-        logger.info { "Setting up notification services..." }
+    private fun setupAdminNotificationService() {
+        logger.info { "Setting up admin notification service..." }
         
-        // Wire up notification services with bot instance
-        notificationService.setBotInstance(bot!!)
+        // Wire up admin notification service with bot instance
         AdminNotificationManager.setBotInstance(bot!!)
         
-        logger.info { "Notification services configured successfully" }
-        logger.debug { "NotificationService status: ${notificationService.getStatus()}" }
+        logger.info { "Admin notification service configured successfully" }
         logger.debug { "AdminNotificationManager status: ${AdminNotificationManager.getStatus()}" }
     }
     
@@ -272,10 +267,8 @@ class Application {
             telegramUser?.shutdown()
             logger.info { "TelegramUser shutdown complete" }
             
-            // 4. Close notification services
-            logger.info { "Shutting down notification services..." }
-            // NotificationService doesn't need explicit shutdown (it just holds bot reference)
-            logger.info { "Notification services shutdown complete" }
+            // 4. Admin notification service doesn't need explicit shutdown (it just holds bot reference)
+            logger.info { "Admin notification service shutdown complete" }
             
             // 5. Close Telegram Bots Application
             logger.info { "Shutting down Telegram Bots Application..." }
