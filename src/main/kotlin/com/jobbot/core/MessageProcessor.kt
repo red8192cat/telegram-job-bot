@@ -231,7 +231,8 @@ class MessageProcessor(private val database: Database) {
         val phrases = mutableListOf<List<String>>()
         val andGroups = mutableListOf<List<String>>()
         
-        val keywords = keywordsString.split(",").map { it.trim() }.filter { it.isNotBlank() }
+        // 🔧 FIXED: Smart splitting that handles missing commas around brackets
+        val keywords = smartSplitKeywords(keywordsString)
         
         for (keyword in keywords) {
             when {
@@ -290,6 +291,69 @@ class MessageProcessor(private val database: Database) {
             phrases = phrases,
             andGroups = andGroups
         )
+    }
+    
+    /**
+     * Smart keyword splitting that handles missing commas around brackets
+     * Examples:
+     * - "[admin*] linux" → ["[admin*]", "linux"]
+     * - "[remote/onlin*], python" → ["[remote/onlin*]", "python"]
+     * - "java, [senior*] python" → ["java", "[senior*]", "python"]
+     */
+    private fun smartSplitKeywords(keywordsString: String): List<String> {
+        // First, split by commas normally
+        val commaSplit = keywordsString.split(",").map { it.trim() }.filter { it.isNotBlank() }
+        
+        val result = mutableListOf<String>()
+        
+        for (item in commaSplit) {
+            // Check if this item contains brackets but doesn't end with ]
+            if (item.contains("[") && item.contains("]") && !item.endsWith("]")) {
+                // This looks like "[admin*] linux" - try to split it
+                val splitResult = splitBracketKeyword(item)
+                if (splitResult.size > 1) {
+                    logger.debug { "Auto-split malformed keyword '$item' into: ${splitResult.joinToString(", ")}" }
+                    result.addAll(splitResult)
+                } else {
+                    result.add(item)
+                }
+            } else {
+                result.add(item)
+            }
+        }
+        
+        return result
+    }
+    
+    /**
+     * Split a keyword that contains brackets followed by other text
+     * Example: "[admin*] linux python" → ["[admin*]", "linux", "python"]
+     */
+    private fun splitBracketKeyword(keyword: String): List<String> {
+        val bracketPattern = Regex("""(\[[^\]]+\])(.*)""")
+        val match = bracketPattern.find(keyword)
+        
+        return if (match != null) {
+            val bracketPart = match.groupValues[1]
+            val remaining = match.groupValues[2].trim()
+            
+            val parts = mutableListOf(bracketPart)
+            if (remaining.isNotEmpty()) {
+                // Split remaining by spaces (but be careful with phrases)
+                val remainingParts = remaining.split("\\s+".toRegex())
+                    .filter { it.isNotBlank() }
+                parts.addAll(remainingParts)
+            }
+            
+            logger.warn { 
+                "Found malformed syntax: '$keyword'. " +
+                "Consider using commas: '${parts.joinToString(", ")}' for clarity."
+            }
+            
+            parts
+        } else {
+            listOf(keyword)
+        }
     }
     
     /**
