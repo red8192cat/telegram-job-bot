@@ -5,6 +5,7 @@ import com.zaxxer.hikari.HikariDataSource
 import com.jobbot.data.repositories.UserRepository
 import com.jobbot.data.repositories.ChannelRepository
 import com.jobbot.data.repositories.AdminRepository
+import com.jobbot.data.repositories.PremiumRepository
 import com.jobbot.data.migrations.DatabaseMigration
 import com.jobbot.data.models.*
 import com.jobbot.shared.getLogger
@@ -21,6 +22,7 @@ class Database(private val databasePath: String) {
     val userRepository: UserRepository
     val channelRepository: ChannelRepository
     val adminRepository: AdminRepository
+    val premiumRepository: PremiumRepository  // NEW: Premium repository
     
     init {
         dataSource = createDataSource()
@@ -29,6 +31,7 @@ class Database(private val databasePath: String) {
         userRepository = UserRepository { getConnection() }
         channelRepository = ChannelRepository { getConnection() }
         adminRepository = AdminRepository({ getConnection() }, userRepository)
+        premiumRepository = PremiumRepository({ getConnection() }, userRepository)  // NEW
         
         initDatabase()
     }
@@ -139,6 +142,16 @@ class Database(private val databasePath: String) {
     fun getBannedUser(userId: Long): BannedUser? = adminRepository.getBannedUser(userId)
     fun getAllBannedUsers(): List<BannedUser> = adminRepository.getAllBannedUsers()
     fun getUserInfo(userId: Long): UserInfo? = adminRepository.getUserInfo(userId)
+    
+    // NEW: Premium operations
+    fun grantPremium(userId: Long, grantedByAdmin: Long, reason: String? = null): Boolean = 
+        premiumRepository.grantPremium(userId, grantedByAdmin, reason)
+    fun revokePremium(userId: Long, revokedByAdmin: Long, reason: String? = null): Boolean = 
+        premiumRepository.revokePremium(userId, revokedByAdmin, reason)
+    fun isPremiumUser(userId: Long): Boolean = premiumRepository.isPremiumUser(userId)
+    fun getPremiumUser(userId: Long): PremiumUser? = premiumRepository.getPremiumUser(userId)
+    fun getAllPremiumUsers(): List<PremiumUserInfo> = premiumRepository.getAllPremiumUsers()
+    fun getPremiumUserCount(): Int = premiumRepository.getPremiumUserCount()
     
     // ✅ MONITORING: Check pool health
     fun getPoolStats(): Map<String, Any> {

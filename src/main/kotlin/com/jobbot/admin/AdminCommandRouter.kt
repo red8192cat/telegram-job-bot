@@ -14,7 +14,7 @@ import org.telegram.telegrambots.meta.api.objects.message.Message
 
 /**
  * Main router for admin commands - coordinates between specialized handlers
- * 🔧 UPDATED: Now supports multiple admins
+ * 🔧 UPDATED: Now supports multiple admins AND premium management
  */
 class AdminCommandRouter(
     private val config: BotConfig,
@@ -30,6 +30,7 @@ class AdminCommandRouter(
     private val systemHandler = AdminSystemHandler(database, rateLimiter, telegramUser)
     private val userHandler = AdminUserHandler(database, config)
     private val authHandler = AdminAuthHandler(telegramUser)
+    private val premiumHandler = AdminPremiumHandler(database, config)  // NEW: Premium handler
     
     private var bot: TelegramBot? = null
     
@@ -128,6 +129,16 @@ class AdminCommandRouter(
             text.startsWith("/admin auth_password") -> 
                 authHandler.handleAuthPassword(chatId, text)
             
+            // NEW: Premium management commands
+            text.startsWith("/admin premium_users") -> 
+                premiumHandler.handlePremiumUsers(chatId)
+            
+            text.startsWith("/admin grant_premium") -> 
+                premiumHandler.handleGrantPremium(chatId, text)
+            
+            text.startsWith("/admin revoke_premium") -> 
+                premiumHandler.handleRevokePremium(chatId, text)
+            
             // Default: show help
             else -> dashboardHandler.handleAdminHelp(chatId)
         }
@@ -164,6 +175,10 @@ class AdminCommandRouter(
             data == "admin_users_menu" -> 
                 dashboardHandler.createUsersMenu(chatId, messageId)
             
+            // NEW: Premium submenu navigation
+            data == "admin_premium_menu" -> 
+                dashboardHandler.createPremiumMenu(chatId, messageId)
+            
             // System submenu actions
             data == "admin_system_log_level" -> 
                 dashboardHandler.createSystemLogLevelMenu(chatId, messageId)
@@ -180,7 +195,6 @@ class AdminCommandRouter(
             data == "admin_tdlib_auth_status" -> 
                 dashboardHandler.showTdlibAuthStatus(chatId, messageId)
             
-            // 🔧 NEW: List admins button
             data == "admin_list_admins" ->
                 dashboardHandler.createListAdminsPage(chatId, messageId)
             
@@ -193,6 +207,13 @@ class AdminCommandRouter(
             
             data == "admin_unban_user" -> 
                 dashboardHandler.createUnbanUserMenu(chatId, messageId)
+            
+            // NEW: Premium submenu actions
+            data == "admin_grant_premium" -> 
+                dashboardHandler.createGrantPremiumMenu(chatId, messageId)
+            
+            data == "admin_revoke_premium" -> 
+                dashboardHandler.createRevokePremiumMenu(chatId, messageId)
             
             // Shutdown actions
             data == "admin_shutdown_confirm" -> 
@@ -229,6 +250,17 @@ class AdminCommandRouter(
             data.startsWith("admin_unban_user_") -> {
                 val userId = data.substringAfter("admin_unban_user_").toLongOrNull()
                 if (userId != null) userHandler.handleUnbanUserCallback(chatId, messageId, userId) else null
+            }
+            
+            // NEW: Premium callbacks
+            data.startsWith("admin_grant_premium_") -> {
+                val userId = data.substringAfter("admin_grant_premium_").toLongOrNull()
+                if (userId != null) premiumHandler.createGrantPremiumConfirmation(chatId, messageId, userId) else null
+            }
+            
+            data.startsWith("admin_revoke_premium_") -> {
+                val userId = data.substringAfter("admin_revoke_premium_").toLongOrNull()
+                if (userId != null) premiumHandler.handleRevokePremiumCallback(chatId, messageId, userId) else null
             }
             
             else -> null

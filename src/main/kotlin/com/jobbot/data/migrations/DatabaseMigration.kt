@@ -5,7 +5,7 @@ import java.sql.Connection
 class DatabaseMigration(private val logger: io.github.oshai.kotlinlogging.KLogger) {
     
     companion object {
-        const val CURRENT_VERSION = 2
+        const val CURRENT_VERSION = 3  // Updated to version 3
     }
     
     fun runMigrations(connection: Connection) {
@@ -60,8 +60,8 @@ class DatabaseMigration(private val logger: io.github.oshai.kotlinlogging.KLogge
                 
                 when (version) {
                     2 -> migrateToVersion2(connection)
+                    3 -> migrateToVersion3(connection)  // New migration
                     // Add future migrations here:
-                    // 3 -> migrateToVersion3(connection)
                     // 4 -> migrateToVersion4(connection)
                 }
                 
@@ -159,6 +159,52 @@ class DatabaseMigration(private val logger: io.github.oshai.kotlinlogging.KLogge
         }
     }
     
+    private fun migrateToVersion3(connection: Connection) {
+        logger.info { "Migration 3: Premium user management system" }
+        
+        try {
+            // 1. Add premium columns to users table
+            logger.info { "Adding premium columns to users table..." }
+            addColumnIfNotExists(connection, "users", "is_premium", "INTEGER DEFAULT 0 CHECK (is_premium IN (0, 1))")
+            addColumnIfNotExists(connection, "users", "premium_granted_at", "DATETIME")
+            addColumnIfNotExists(connection, "users", "premium_granted_by", "INTEGER")
+            
+            // 2. Create premium_users table for detailed tracking
+            logger.info { "Creating premium_users table..." }
+            connection.createStatement().execute("""
+                CREATE TABLE IF NOT EXISTS premium_users (
+                    user_id INTEGER PRIMARY KEY,
+                    granted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    granted_by_admin INTEGER NOT NULL,
+                    reason TEXT,
+                    is_active INTEGER DEFAULT 1 CHECK (is_active IN (0, 1)),
+                    revoked_at DATETIME,
+                    revoked_by_admin INTEGER,
+                    revoke_reason TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(telegram_id)
+                )
+            """)
+            
+            // 3. Create indexes for premium functionality
+            logger.info { "Creating premium indexes..." }
+            connection.createStatement().execute(
+                "CREATE INDEX IF NOT EXISTS idx_premium_users_user_id ON premium_users(user_id)"
+            )
+            connection.createStatement().execute(
+                "CREATE INDEX IF NOT EXISTS idx_premium_users_active ON premium_users(is_active)"
+            )
+            connection.createStatement().execute(
+                "CREATE INDEX IF NOT EXISTS idx_users_premium ON users(is_premium)"
+            )
+            
+            logger.info { "Migration to version 3 completed successfully" }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to migrate to version 3" }
+            throw e
+        }
+    }
+    
     private fun addColumnIfNotExists(connection: Connection, tableName: String, columnName: String, columnDef: String) {
         if (!columnExists(connection, tableName, columnName)) {
             val sql = "ALTER TABLE $tableName ADD COLUMN $columnName $columnDef"
@@ -196,6 +242,7 @@ class DatabaseMigration(private val logger: io.github.oshai.kotlinlogging.KLogge
     private fun getMigrationDescription(version: Int): String {
         return when (version) {
             2 -> "Enhanced channel management and user activity fixes"
+            3 -> "Premium user management system"
             else -> "Migration to version $version"
         }
     }
