@@ -189,6 +189,14 @@ class AdminDashboardHandler(
                 .build()
         ))
         
+        // 🔧 NEW: Add List Admins button
+        buttons.add(InlineKeyboardRow(
+            InlineKeyboardButton.builder()
+                .text(Localization.getAdminMessage("admin.system.button.list.admins"))
+                .callbackData("admin_list_admins")
+                .build()
+        ))
+        
         if (BotShutdownManager.isShutdownMode()) {
             buttons.add(InlineKeyboardRow(
                 InlineKeyboardButton.builder()
@@ -211,6 +219,42 @@ class AdminDashboardHandler(
                 .callbackData("admin_dashboard")
                 .build()
         ))
+        
+        return InlineKeyboardMarkup.builder().keyboard(buttons).build()
+    }
+    
+    // 🔧 NEW: List Admins Page
+    fun createListAdminsPage(chatId: String, messageId: Int): EditMessageText {
+        val adminList = config.authorizedAdminIds.mapIndexed { index, adminId ->
+            Localization.getAdminMessage("admin.list.admins.item", index + 1, adminId.toString())
+        }.joinToString("\n")
+        
+        val adminsText = Localization.getAdminMessage(
+            "admin.list.admins.page",
+            config.getAdminCount(),
+            adminList
+        )
+        
+        val keyboard = createListAdminsKeyboard()
+        
+        return EditMessageText.builder()
+            .chatId(chatId)
+            .messageId(messageId)
+            .text(adminsText)
+            // NO parseMode - bulletproof
+            .replyMarkup(keyboard)
+            .build()
+    }
+    
+    private fun createListAdminsKeyboard(): InlineKeyboardMarkup {
+        val buttons = listOf(
+            InlineKeyboardRow(
+                InlineKeyboardButton.builder()
+                    .text(Localization.getAdminMessage("admin.common.button.back"))
+                    .callbackData("admin_system_menu")
+                    .build()
+            )
+        )
         
         return InlineKeyboardMarkup.builder().keyboard(buttons).build()
     }

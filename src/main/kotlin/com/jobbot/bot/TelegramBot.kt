@@ -87,15 +87,13 @@ class TelegramBot(
         }
         
         val response = when {
-            // Admin commands: only authorized admin gets routed to AdminCommandRouter
-            text.contains("/admin") && userId == config.authorizedAdminId -> 
+            // 🔧 SECURITY FIX: Only authorized admins can access admin commands
+            // Unauthorized users get "invalid command" - they don't know admin commands exist
+            text.contains("/admin") && config.isAdmin(userId) -> 
                 adminCommandRouter.handleAdminCommand(message)
             
-            // Non-admin users trying admin commands: treat as invalid command
-            text.contains("/admin") -> 
-                userCommandHandler.handleInvalidCommand(chatId.toString(), userId)
-            
-            // All other commands: normal user command handling
+            // 🔧 SECURITY FIX: All other commands (including unauthorized /admin attempts)
+            // are handled as regular user commands - admin commands are invisible to non-admins
             else -> 
                 userCommandHandler.handleUserCommand(message)
         }
@@ -122,12 +120,13 @@ class TelegramBot(
                 .build()
             telegramClient.execute(answerCallback)
             
-            // Route callback query to appropriate handler
-            val response = if (userId == config.authorizedAdminId && callbackQuery.data.startsWith("admin_")) {
+            // 🔧 SECURITY FIX: Only authorized admins can access admin callbacks
+            // Unauthorized users get normal user callback handling (which ignores admin callbacks)
+            val response = if (config.isAdmin(userId) && callbackQuery.data.startsWith("admin_")) {
                 // Handle admin callback queries through the router
                 adminCommandRouter.handleAdminCallback(callbackQuery)
             } else {
-                // Handle user callback queries
+                // Handle user callback queries (unauthorized admin callbacks are ignored)
                 userCommandHandler.handleCallbackQuery(callbackQuery)
             }
             
@@ -183,21 +182,29 @@ class TelegramBot(
     fun sendAdminNotification(message: String) {
         scope.launch {
             try {
-                val sendMessage = SendMessage.builder()
-                    .chatId(config.authorizedAdminId.toString())
-                    .text("${Localization.getAdminMessage("admin.notification.prefix")}\n\n$message")
-                    // NO parseMode - admin notifications can contain system data with special chars
-                    .build()
-                
-                withContext(Dispatchers.IO) {
-                    telegramClient.execute(sendMessage)
+                // 🔧 UPDATED: Send notifications to ALL authorized admins
+                for (adminId in config.authorizedAdminIds) {
+                    try {
+                        val sendMessage = SendMessage.builder()
+                            .chatId(adminId.toString())
+                            .text("${Localization.getAdminMessage("admin.notification.prefix")}\n\n$message")
+                            // NO parseMode - admin notifications can contain system data with special chars
+                            .build()
+                        
+                        withContext(Dispatchers.IO) {
+                            telegramClient.execute(sendMessage)
+                        }
+                        
+                        logger.debug { "Admin notification sent to admin $adminId" }
+                    } catch (e: Exception) {
+                        logger.warn(e) { "Failed to send admin notification to admin $adminId" }
+                        // Continue sending to other admins even if one fails
+                    }
                 }
                 
-                logger.debug { "Admin notification sent" }
-                
             } catch (e: Exception) {
-                logger.error(e) { "Failed to send admin notification" }
-                ErrorTracker.logError("ERROR", "Failed to send admin notification: ${e.message}", e)
+                logger.error(e) { "Failed to send admin notifications" }
+                ErrorTracker.logError("ERROR", "Failed to send admin notifications: ${e.message}", e)
             }
         }
     }
@@ -235,22 +242,30 @@ class TelegramBot(
                     )
                 )
                 
-                val sendMessage = SendMessage.builder()
-                    .chatId(config.authorizedAdminId.toString())
-                    .text(alertText)
-                    // NO parseMode - usernames can have special characters
-                    .replyMarkup(InlineKeyboardMarkup.builder().keyboard(buttons).build())
-                    .build()
-                
-                withContext(Dispatchers.IO) {
-                    telegramClient.execute(sendMessage)
+                // 🔧 UPDATED: Send rate limit alerts to ALL authorized admins
+                for (adminId in config.authorizedAdminIds) {
+                    try {
+                        val sendMessage = SendMessage.builder()
+                            .chatId(adminId.toString())
+                            .text(alertText)
+                            // NO parseMode - usernames can have special characters
+                            .replyMarkup(InlineKeyboardMarkup.builder().keyboard(buttons).build())
+                            .build()
+                        
+                        withContext(Dispatchers.IO) {
+                            telegramClient.execute(sendMessage)
+                        }
+                        
+                        logger.debug { "Rate limit alert sent to admin $adminId for user $userId" }
+                    } catch (e: Exception) {
+                        logger.warn(e) { "Failed to send rate limit alert to admin $adminId" }
+                        // Continue sending to other admins even if one fails
+                    }
                 }
                 
-                logger.debug { "Rate limit alert sent for user $userId" }
-                
             } catch (e: Exception) {
-                logger.error(e) { "Failed to send rate limit alert" }
-                ErrorTracker.logError("ERROR", "Failed to send rate limit alert: ${e.message}", e)
+                logger.error(e) { "Failed to send rate limit alerts" }
+                ErrorTracker.logError("ERROR", "Failed to send rate limit alerts: ${e.message}", e)
             }
         }
     }
@@ -292,22 +307,30 @@ class TelegramBot(
                     )
                 )
                 
-                val sendMessage = SendMessage.builder()
-                    .chatId(config.authorizedAdminId.toString())
-                    .text(reminderText)
-                    // NO parseMode - system data might contain special characters
-                    .replyMarkup(InlineKeyboardMarkup.builder().keyboard(buttons).build())
-                    .build()
-                
-                withContext(Dispatchers.IO) {
-                    telegramClient.execute(sendMessage)
+                // 🔧 UPDATED: Send shutdown reminders to ALL authorized admins
+                for (adminId in config.authorizedAdminIds) {
+                    try {
+                        val sendMessage = SendMessage.builder()
+                            .chatId(adminId.toString())
+                            .text(reminderText)
+                            // NO parseMode - system data might contain special characters
+                            .replyMarkup(InlineKeyboardMarkup.builder().keyboard(buttons).build())
+                            .build()
+                        
+                        withContext(Dispatchers.IO) {
+                            telegramClient.execute(sendMessage)
+                        }
+                        
+                        logger.debug { "Shutdown reminder sent to admin $adminId" }
+                    } catch (e: Exception) {
+                        logger.warn(e) { "Failed to send shutdown reminder to admin $adminId" }
+                        // Continue sending to other admins even if one fails
+                    }
                 }
                 
-                logger.debug { "Shutdown reminder sent" }
-                
             } catch (e: Exception) {
-                logger.error(e) { "Failed to send shutdown reminder" }
-                ErrorTracker.logError("ERROR", "Failed to send shutdown reminder: ${e.message}", e)
+                logger.error(e) { "Failed to send shutdown reminders" }
+                ErrorTracker.logError("ERROR", "Failed to send shutdown reminders: ${e.message}", e)
             }
         }
     }

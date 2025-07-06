@@ -15,6 +15,7 @@ import java.time.format.DateTimeFormatter
 /**
  * Handles user management and moderation operations
  * BULLETPROOF: NO MARKDOWN - Works with any usernames, ban reasons, user data
+ * 🔧 UPDATED: Multi-admin support
  */
 class AdminUserHandler(
     private val database: Database,
@@ -47,7 +48,8 @@ class AdminUserHandler(
                 .build()
         }
         
-        if (userId == config.authorizedAdminId) {
+        // 🔧 UPDATED: Prevent banning ANY admin (not just the first one)
+        if (config.isAdmin(userId)) {
             return SendMessage.builder()
                 .chatId(chatId)
                 .text(Localization.getAdminMessage("admin.user.ban.cannot.ban.admin"))
@@ -63,7 +65,8 @@ class AdminUserHandler(
                 .build()
         }
         
-        val success = database.banUser(userId, reason, config.authorizedAdminId)
+        // 🔧 UPDATED: Use first admin ID for ban tracking (could be any admin really)
+        val success = database.banUser(userId, reason, config.getFirstAdminId())
         
         return if (success) {
             logger.info { "User $userId banned by admin: $reason" }

@@ -200,7 +200,7 @@ class Application {
             val startupMessage = Localization.getAdminMessage(
                 "admin.startup.message",
                 tdlibStatus,
-                config.authorizedAdminId.toString(),
+                config.getFirstAdminId().toString(),
                 currentPoolStats["maximumPoolSize"] ?: 0,
                 currentPoolStats["activeConnections"] ?: 0,
                 config.rateLimitMessagesPerMinute,
@@ -227,7 +227,7 @@ class Application {
         val config = Config.config
         
         logger.info { "Bot started successfully!" }
-        logger.info { "Admin ID: ${config.authorizedAdminId}" }
+        logger.info { "Admin IDs: ${config.authorizedAdminIds.joinToString(", ")}" }
         logger.info { "Database: ${config.databasePath} (HikariCP pooling enabled)" }
         
         val currentPoolStats = database.getPoolStats()

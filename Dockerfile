@@ -31,9 +31,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Create user and group FIRST
+# 🔧 SECURITY FIX: Create non-root user and group FIRST
 RUN groupadd -g 1001 appgroup && \
-    useradd -u 1001 -g appgroup -m appuser
+    useradd -u 1001 -g appgroup -m -s /bin/bash appuser
 
 # Copy the built JAR from builder stage
 COPY --from=builder /app/gradle/build/libs/*-all.jar app.jar
@@ -45,9 +45,14 @@ COPY --from=builder /app/libs/natives/libtdjni.so /app/natives/libtdjni.so
 COPY scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh
 
-# Create directories and set ownership in one step
+# 🔧 SECURITY FIX: Create directories and set ownership for non-root user
 RUN mkdir -p /app/data /app/logs /app/natives && \
-    chown -R appuser:appgroup /app
+    chown -R appuser:appgroup /app && \
+    chown -R appuser:appgroup /usr/local/bin/
+
+# 🔧 SECURITY FIX: Ensure native library is owned by appuser
+RUN chown appuser:appgroup /app/natives/libtdjni.so && \
+    chmod 755 /app/natives/libtdjni.so
 
 # Set library path for your custom native library
 ENV LD_LIBRARY_PATH=/app/natives:$LD_LIBRARY_PATH
@@ -63,7 +68,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # JVM optimization for containers - include custom library path
 ENV JAVA_OPTS="-Xms64m -Xmx280m -XX:MaxMetaspaceSize=96m -XX:+UseG1GC -XX:+UseStringDeduplication -XX:+UseContainerSupport -Djava.library.path=/app/natives"
 
-# Run as non-root user for security
+# 🔧 SECURITY FIX: Switch to non-root user BEFORE running the application
 USER appuser
 
 # Start the application with your custom TDLib
