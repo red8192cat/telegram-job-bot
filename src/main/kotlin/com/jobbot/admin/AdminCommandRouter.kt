@@ -244,7 +244,7 @@ class AdminCommandRouter(
         }.joinToString("\n")
         
         val responseText = Localization.getAdminMessage(
-            "admin.list.admins.response",
+            "admin.list.admins.page",
             config.getAdminCount(),
             adminList
         )
