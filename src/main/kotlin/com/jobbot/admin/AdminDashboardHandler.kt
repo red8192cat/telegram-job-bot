@@ -226,7 +226,7 @@ class AdminDashboardHandler(
     // 🔧 NEW: List Admins Page
     fun createListAdminsPage(chatId: String, messageId: Int): EditMessageText {
         val adminList = config.authorizedAdminIds.mapIndexed { index, adminId ->
-            Localization.getAdminMessage("admin.list.admins.item", index + 1, adminId)
+            Localization.getAdminMessage("admin.list.admins.item", index + 1, adminId.toString())
         }.joinToString("\n")
         
         val adminsText = Localization.getAdminMessage(
