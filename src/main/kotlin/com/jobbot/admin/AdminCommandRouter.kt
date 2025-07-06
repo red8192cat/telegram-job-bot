@@ -13,6 +13,7 @@ import org.telegram.telegrambots.meta.api.objects.message.Message
 
 /**
  * Main router for admin commands - coordinates between specialized handlers
+ * 🔧 UPDATED: Now supports multiple admins
  */
 class AdminCommandRouter(
     private val config: BotConfig,
@@ -43,10 +44,17 @@ class AdminCommandRouter(
         val chatId = message.chatId.toString()
         val rawText = message.text?.trim() ?: return null
         
+        // 🔧 SECURITY: This method should only be called for authorized admins
+        // Unauthorized users are handled as regular user commands in TelegramBot
+        if (!config.isAdmin(userId)) {
+            logger.error { "SECURITY VIOLATION: handleAdminCommand called for unauthorized user $userId" }
+            return null // Should never happen due to TelegramBot routing
+        }
+        
         // Clean bot mentions from admin commands
         val text = cleanBotMention(rawText)
         
-        logger.info { "Admin command received: $text" }
+        logger.info { "Admin command received from authorized admin $userId: $text" }
         
         // Route to appropriate handler based on command
         return when {
@@ -56,6 +64,10 @@ class AdminCommandRouter(
             
             text.startsWith("/admin help") -> 
                 dashboardHandler.handleAdminHelp(chatId)
+            
+            // Admin management commands (new!)
+            text.startsWith("/admin list_admins") ->
+                handleListAdmins(chatId)
             
             // Channel management commands
             text.startsWith("/admin channels") -> 
@@ -126,7 +138,14 @@ class AdminCommandRouter(
         val messageId = callbackQuery.message.messageId
         val data = callbackQuery.data
         
-        logger.info { "Admin callback received: $data" }
+        // 🔧 SECURITY: This method should only be called for authorized admins
+        // Unauthorized users are handled as regular user callbacks in TelegramBot
+        if (!config.isAdmin(userId)) {
+            logger.error { "SECURITY VIOLATION: handleAdminCallback called for unauthorized user $userId" }
+            return null // Should never happen due to TelegramBot routing
+        }
+        
+        logger.info { "Admin callback received from authorized admin $userId: $data" }
         
         // Route to appropriate handler based on callback data
         return when {
@@ -209,6 +228,26 @@ class AdminCommandRouter(
             
             else -> null
         }
+    }
+    
+    /**
+     * 🔧 Handle listing all authorized admins
+     */
+    private fun handleListAdmins(chatId: String): SendMessage {
+        val adminList = config.authorizedAdminIds.mapIndexed { index, adminId ->
+            "  ${index + 1}. Admin ID: $adminId"
+        }.joinToString("\n")
+        
+        val responseText = "👥 AUTHORIZED ADMINS\n" +
+                          "═══════════════════\n\n" +
+                          "📊 Total admins: ${config.getAdminCount()}\n\n" +
+                          "📋 Admin list:\n$adminList\n\n" +
+                          "💡 To add more admins, update AUTHORIZED_ADMIN_IDS in configuration and restart the bot."
+        
+        return SendMessage.builder()
+            .chatId(chatId)
+            .text(responseText)
+            .build()
     }
     
     private fun cleanBotMention(text: String): String {

@@ -20,15 +20,49 @@ object Config {
             apiId = getEnv("API_ID")?.toIntOrNull(),
             apiHash = getEnv("API_HASH"),
             phoneNumber = getEnv("PHONE_NUMBER"),
-            authorizedAdminId = getEnvOrThrow("AUTHORIZED_ADMIN_ID").toLong(),
+            authorizedAdminIds = parseAdminIds(), // 🔧 CHANGED: Parse multiple admin IDs
             databasePath = getEnv("DATABASE_PATH") ?: "./data/bot.db",
             logPath = getEnv("LOG_PATH") ?: "./logs",
             logLevel = getEnv("LOG_LEVEL") ?: "INFO",
             tdlibLogLevel = getEnv("TDLIB_LOG_LEVEL") ?: "ERROR",
-            // Updated more permissive defaults for better user experience
             rateLimitMessagesPerMinute = getEnv("RATE_LIMIT_MESSAGES_PER_MINUTE")?.toIntOrNull() ?: 60,
             rateLimitBurstSize = getEnv("RATE_LIMIT_BURST_SIZE")?.toIntOrNull() ?: 10
         )
+    }
+    
+    /**
+     * Parse admin IDs from environment variable
+     * Supports both single and multiple admins in one simple format
+     * Examples:
+     * - AUTHORIZED_ADMIN_IDS=123456789 (single admin)
+     * - AUTHORIZED_ADMIN_IDS=123456789,987654321,555444333 (multiple admins)
+     */
+    private fun parseAdminIds(): List<Long> {
+        val adminIdsEnv = getEnvOrThrow("AUTHORIZED_ADMIN_IDS")
+        
+        val adminIds = adminIdsEnv.split(",")
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .mapNotNull { 
+                try {
+                    it.toLong().also { id ->
+                        if (id <= 0) {
+                            logger.warn { "Invalid admin ID: $id (must be positive)" }
+                            null
+                        } else id
+                    }
+                } catch (e: NumberFormatException) {
+                    logger.warn { "Invalid admin ID format: $it" }
+                    null
+                }
+            }
+        
+        if (adminIds.isEmpty()) {
+            throw IllegalStateException("AUTHORIZED_ADMIN_IDS must contain at least one valid admin ID")
+        }
+        
+        logger.info { "Loaded ${adminIds.size} admin ID(s): ${adminIds.joinToString(", ")}" }
+        return adminIds
     }
     
     private fun getEnv(key: String): String? {
@@ -47,8 +81,14 @@ object Config {
                 throw IllegalStateException("TELEGRAM_BOT_TOKEN cannot be empty")
             }
             
-            if (authorizedAdminId <= 0) {
-                throw IllegalStateException("AUTHORIZED_ADMIN_ID must be a valid Telegram user ID")
+            if (authorizedAdminIds.isEmpty()) {
+                throw IllegalStateException("At least one admin ID must be configured")
+            }
+            
+            authorizedAdminIds.forEach { adminId ->
+                if (adminId <= 0) {
+                    throw IllegalStateException("Admin ID $adminId must be a valid positive Telegram user ID")
+                }
             }
             
             // Validate rate limiting settings
@@ -85,7 +125,8 @@ object Config {
             }
             
             logger.info { "Configuration validated successfully" }
-            logger.info { "Admin ID: $authorizedAdminId" }
+            logger.info { "Admin IDs: ${authorizedAdminIds.joinToString(", ")}" }
+            logger.info { "Admin count: ${getAdminCount()}" }
             logger.info { "Database path: $databasePath" }
             logger.info { "Log path: $logPath" }
             logger.info { "System log level: $logLevel" }
