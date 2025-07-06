@@ -6,6 +6,7 @@ import com.jobbot.data.Database
 import com.jobbot.data.models.BotConfig
 import com.jobbot.infrastructure.security.RateLimiter
 import com.jobbot.shared.getLogger
+import com.jobbot.shared.localization.Localization
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery
@@ -65,7 +66,7 @@ class AdminCommandRouter(
             text.startsWith("/admin help") -> 
                 dashboardHandler.handleAdminHelp(chatId)
             
-            // Admin management commands (new!)
+            // Admin management commands
             text.startsWith("/admin list_admins") ->
                 handleListAdmins(chatId)
             
@@ -179,6 +180,10 @@ class AdminCommandRouter(
             data == "admin_tdlib_auth_status" -> 
                 dashboardHandler.showTdlibAuthStatus(chatId, messageId)
             
+            // 🔧 NEW: List admins button
+            data == "admin_list_admins" ->
+                dashboardHandler.createListAdminsPage(chatId, messageId)
+            
             // Users submenu actions
             data == "admin_rate_settings" -> 
                 dashboardHandler.createRateSettingsMenu(chatId, messageId)
@@ -231,22 +236,23 @@ class AdminCommandRouter(
     }
     
     /**
-     * 🔧 Handle listing all authorized admins
+     * 🔧 Handle listing all authorized admins using proper localization
      */
     private fun handleListAdmins(chatId: String): SendMessage {
         val adminList = config.authorizedAdminIds.mapIndexed { index, adminId ->
-            "  ${index + 1}. Admin ID: $adminId"
+            Localization.getAdminMessage("admin.list.admins.item", index + 1, adminId)
         }.joinToString("\n")
         
-        val responseText = "👥 AUTHORIZED ADMINS\n" +
-                          "═══════════════════\n\n" +
-                          "📊 Total admins: ${config.getAdminCount()}\n\n" +
-                          "📋 Admin list:\n$adminList\n\n" +
-                          "💡 To add more admins, update AUTHORIZED_ADMIN_IDS in configuration and restart the bot."
+        val responseText = Localization.getAdminMessage(
+            "admin.list.admins.response",
+            config.getAdminCount(),
+            adminList
+        )
         
         return SendMessage.builder()
             .chatId(chatId)
             .text(responseText)
+            // NO parseMode - bulletproof
             .build()
     }
     
