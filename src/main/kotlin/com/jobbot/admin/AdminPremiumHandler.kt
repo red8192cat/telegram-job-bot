@@ -136,7 +136,6 @@ class AdminPremiumHandler(
     /**
      * Show premium users list - NO MARKDOWN (usernames can contain special chars)
      */
-
     fun handlePremiumUsers(chatId: String): SendMessage {
         val premiumUsers = database.getAllPremiumUsers()
         val timestamp = java.time.LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))

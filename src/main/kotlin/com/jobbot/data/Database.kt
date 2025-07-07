@@ -22,7 +22,7 @@ class Database(private val databasePath: String) {
     val userRepository: UserRepository
     val channelRepository: ChannelRepository
     val adminRepository: AdminRepository
-    val premiumRepository: PremiumRepository  // NEW: Premium repository
+    val premiumRepository: PremiumRepository
     
     init {
         dataSource = createDataSource()
@@ -31,7 +31,7 @@ class Database(private val databasePath: String) {
         userRepository = UserRepository { getConnection() }
         channelRepository = ChannelRepository { getConnection() }
         adminRepository = AdminRepository({ getConnection() }, userRepository)
-        premiumRepository = PremiumRepository({ getConnection() }, userRepository)  // NEW
+        premiumRepository = PremiumRepository({ getConnection() }, userRepository)
         
         initDatabase()
     }
@@ -143,7 +143,7 @@ class Database(private val databasePath: String) {
     fun getAllBannedUsers(): List<BannedUser> = adminRepository.getAllBannedUsers()
     fun getUserInfo(userId: Long): UserInfo? = adminRepository.getUserInfo(userId)
     
-    // NEW: Premium operations
+    // Premium operations
     fun grantPremium(userId: Long, grantedByAdmin: Long, reason: String? = null): Boolean = 
         premiumRepository.grantPremium(userId, grantedByAdmin, reason)
     fun revokePremium(userId: Long, revokedByAdmin: Long, reason: String? = null): Boolean = 
