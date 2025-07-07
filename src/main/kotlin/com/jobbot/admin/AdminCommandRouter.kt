@@ -14,7 +14,7 @@ import org.telegram.telegrambots.meta.api.objects.message.Message
 
 /**
  * Main router for admin commands - coordinates between specialized handlers
- * 🔧 UPDATED: Now supports multiple admins AND premium management with TDLib username resolution
+ * 🔧 UPDATED: Simplified - premium management merged into users menu
  */
 class AdminCommandRouter(
     private val config: BotConfig,
@@ -30,7 +30,7 @@ class AdminCommandRouter(
     private val systemHandler = AdminSystemHandler(database, rateLimiter, telegramUser)
     private val userHandler = AdminUserHandler(database, config)
     private val authHandler = AdminAuthHandler(telegramUser)
-    private val premiumHandler = AdminPremiumHandler(database, config, telegramUser)  // UPDATED: Pass telegramUser
+    private val premiumHandler = AdminPremiumHandler(database, config, telegramUser)
     
     private var bot: TelegramBot? = null
     
@@ -129,7 +129,7 @@ class AdminCommandRouter(
             text.startsWith("/admin auth_password") -> 
                 authHandler.handleAuthPassword(chatId, text)
             
-            // NEW: Premium management commands (with TDLib username support)
+            // Premium management commands (now accessed through users menu)
             text.startsWith("/admin premium_users") -> 
                 premiumHandler.handlePremiumUsers(chatId)
             
@@ -178,9 +178,7 @@ class AdminCommandRouter(
             data == "admin_users_menu" -> 
                 dashboardHandler.createUsersMenu(chatId, messageId)
             
-            // NEW: Premium submenu navigation
-            data == "admin_premium_menu" -> 
-                dashboardHandler.createPremiumMenu(chatId, messageId)
+            // REMOVED: admin_premium_menu callback - merged into users menu
             
             // System submenu actions
             data == "admin_system_log_level" -> 
@@ -211,7 +209,7 @@ class AdminCommandRouter(
             data == "admin_unban_user" -> 
                 dashboardHandler.createUnbanUserMenu(chatId, messageId)
             
-            // NEW: Premium submenu actions
+            // Premium actions (now called from users menu context)
             data == "admin_grant_premium" -> 
                 dashboardHandler.createGrantPremiumMenu(chatId, messageId)
             
@@ -255,7 +253,7 @@ class AdminCommandRouter(
                 if (userId != null) userHandler.handleUnbanUserCallback(chatId, messageId, userId) else null
             }
             
-            // NEW: Premium callbacks
+            // Premium callbacks (unchanged functionality, but now called from users menu)
             data.startsWith("admin_grant_premium_") -> {
                 val userId = data.substringAfter("admin_grant_premium_").toLongOrNull()
                 if (userId != null) premiumHandler.createGrantPremiumConfirmation(chatId, messageId, userId) else null

@@ -15,7 +15,7 @@ import java.time.format.DateTimeFormatter
 
 /**
  * Handles premium user management operations
- * UPDATED: Simplified for new User model with integrated premium data
+ * UPDATED: Back buttons now go to users menu instead of premium menu
  */
 class AdminPremiumHandler(
     private val database: Database,
@@ -154,7 +154,7 @@ class AdminPremiumHandler(
     }
     
     /**
-     * NEW: Extend premium for existing user
+     * Extend premium for existing user
      */
     fun handleExtendPremium(chatId: String, text: String): SendMessage {
         val parts = text.substringAfter("/admin extend_premium").trim().split(" ")
@@ -316,6 +316,7 @@ class AdminPremiumHandler(
     
     /**
      * Create grant premium confirmation dialog
+     * UPDATED: Back button goes to users menu
      */
     fun createGrantPremiumConfirmation(chatId: String, messageId: Int, userId: Long): EditMessageText {
         val userInfo = database.getUserInfo(userId)
@@ -340,7 +341,7 @@ class AdminPremiumHandler(
                 InlineKeyboardRow(
                     InlineKeyboardButton.builder()
                         .text(Localization.getAdminMessage("admin.button.cancel"))
-                        .callbackData("admin_premium_menu")
+                        .callbackData("admin_users_menu")  // CHANGED: was admin_premium_menu
                         .build()
                 )
             )
@@ -355,7 +356,7 @@ class AdminPremiumHandler(
                 InlineKeyboardRow(
                     InlineKeyboardButton.builder()
                         .text(Localization.getAdminMessage("admin.button.cancel"))
-                        .callbackData("admin_premium_menu")
+                        .callbackData("admin_users_menu")  // CHANGED: was admin_premium_menu
                         .build()
                 )
             )
@@ -371,6 +372,7 @@ class AdminPremiumHandler(
     
     /**
      * Handle revoke premium via callback
+     * UPDATED: Back button goes to users menu
      */
     fun handleRevokePremiumCallback(chatId: String, messageId: Int, userId: Long): EditMessageText {
         val success = database.revokePremium(userId)
@@ -387,7 +389,7 @@ class AdminPremiumHandler(
             InlineKeyboardRow(
                 InlineKeyboardButton.builder()
                     .text(Localization.getAdminMessage("admin.common.button.back"))
-                    .callbackData("admin_premium_menu")
+                    .callbackData("admin_users_menu")  // CHANGED: was admin_premium_menu
                     .build()
             )
         )
