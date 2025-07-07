@@ -30,8 +30,8 @@ class UserCommandHandler(
         
         // Check if user is banned first
         if (database.isUserBanned(userId)) {
-            val bannedInfo = database.getBannedUser(userId)
-            val reason = bannedInfo?.reason ?: "No reason provided"
+            val user = database.getUser(userId)
+            val reason = user?.banReason ?: "No reason provided"
             return SendMessage.builder()
                 .chatId(chatId)
                 .text(Localization.getMessage(getUserLanguage(userId), "error.user_banned", reason))

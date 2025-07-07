@@ -2,37 +2,22 @@ package com.jobbot.data
 
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
-import com.jobbot.data.repositories.UserRepository
-import com.jobbot.data.repositories.ChannelRepository
-import com.jobbot.data.repositories.AdminRepository
-import com.jobbot.data.repositories.PremiumRepository
 import com.jobbot.data.migrations.DatabaseMigration
 import com.jobbot.data.models.*
 import com.jobbot.shared.getLogger
 import java.sql.Connection
-import javax.sql.DataSource
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 class Database(private val databasePath: String) {
     private val logger = getLogger("Database")
+    private val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
     
     // ✅ CONNECTION POOL: Created once, reused for all operations
     private val dataSource: HikariDataSource
     
-    // Repository instances
-    val userRepository: UserRepository
-    val channelRepository: ChannelRepository
-    val adminRepository: AdminRepository
-    val premiumRepository: PremiumRepository
-    
     init {
         dataSource = createDataSource()
-        
-        // Initialize repositories with connection provider
-        userRepository = UserRepository { getConnection() }
-        channelRepository = ChannelRepository { getConnection() }
-        adminRepository = AdminRepository({ getConnection() }, userRepository)
-        premiumRepository = PremiumRepository({ getConnection() }, userRepository)
-        
         initDatabase()
     }
     
@@ -60,7 +45,7 @@ class Database(private val databasePath: String) {
             // Pool name for monitoring
             poolName = "TelegramBotPool"
             
-            // Leak detection (helps find connection leaks during development)
+            // Leak detection
             leakDetectionThreshold = 60000 // 60 seconds
         }
         
@@ -107,51 +92,756 @@ class Database(private val databasePath: String) {
         }
     }
     
-    // Delegate methods to repositories for backward compatibility
+    // ===============================
+    // USER OPERATIONS (DIRECT METHODS)
+    // ===============================
     
-    // User operations
-    fun getUser(telegramId: Long): User? = userRepository.getUser(telegramId)
-    fun createUser(user: User): Boolean = userRepository.createUser(user)
-    fun updateUser(user: User): Boolean = userRepository.updateUser(user)
-    fun getAllUsers(): List<User> = userRepository.getAllUsers()
-    fun getActiveUsersCount(): Int = userRepository.getActiveUsersCount()
-    fun updateUserActivity(telegramId: Long) = userRepository.updateUserActivity(telegramId)
-    fun getUserActivity(telegramId: Long): UserActivity? = userRepository.getUserActivity(telegramId)
-    fun batchUpdateUsers(updates: List<Pair<Long, String>>): Boolean = userRepository.batchUpdateUsers(updates)
+    fun getUser(telegramId: Long): User? {
+        val sql = "SELECT * FROM users WHERE telegram_id = ?"
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setLong(1, telegramId)
+                    stmt.executeQuery().use { rs ->
+                        if (rs.next()) {
+                            User(
+                                telegramId = rs.getLong("telegram_id"),
+                                language = rs.getString("language"),
+                                keywords = rs.getString("keywords"),
+                                ignoreKeywords = rs.getString("ignore_keywords"),
+                                lastInteraction = LocalDateTime.parse(rs.getString("last_interaction"), dateFormatter),
+                                isPremium = rs.getInt("is_premium") == 1,
+                                premiumGrantedAt = rs.getString("premium_granted_at")?.let { 
+                                    LocalDateTime.parse(it, dateFormatter) 
+                                },
+                                premiumExpiresAt = rs.getString("premium_expires_at")?.let { 
+                                    LocalDateTime.parse(it, dateFormatter) 
+                                },
+                                premiumReason = rs.getString("premium_reason"),
+                                isBanned = rs.getInt("is_banned") == 1,
+                                bannedAt = rs.getString("banned_at")?.let { 
+                                    LocalDateTime.parse(it, dateFormatter) 
+                                },
+                                banReason = rs.getString("ban_reason"),
+                                createdAt = LocalDateTime.parse(rs.getString("created_at"), dateFormatter),
+                                updatedAt = LocalDateTime.parse(rs.getString("updated_at"), dateFormatter)
+                            )
+                        } else null
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get user $telegramId" }
+            null
+        }
+    }
     
-    // Channel operations
-    fun addChannel(channelId: String, channelName: String?): Boolean = channelRepository.addChannel(channelId, channelName)
-    fun addChannelWithDetails(channelId: String, channelTag: String?, channelName: String?): Boolean = 
-        channelRepository.addChannelWithDetails(channelId, channelTag, channelName)
-    fun findChannelIdByTag(channelTag: String): String? = channelRepository.findChannelIdByTag(channelTag)
-    fun updateChannelTag(channelId: String, newTag: String?, newName: String?): Boolean = 
-        channelRepository.updateChannelTag(channelId, newTag, newName)
-    fun removeChannel(channelId: String): Boolean = channelRepository.removeChannel(channelId)
-    fun removeChannelById(channelId: String): Boolean = channelRepository.removeChannelById(channelId)
-    fun getAllChannels(): List<Channel> = channelRepository.getAllChannels()
-    fun getAllChannelsWithDetails(): List<ChannelDetails> = channelRepository.getAllChannelsWithDetails()
-    fun getAllChannelIds(): List<String> = channelRepository.getAllChannelIds()
-    fun channelExists(channelId: String): Boolean = channelRepository.channelExists(channelId)
-    fun channelExistsById(channelId: String): Boolean = channelRepository.channelExistsById(channelId)
+    fun createUser(user: User): Boolean {
+        val sql = """
+            INSERT INTO users (telegram_id, language, keywords, ignore_keywords, last_interaction,
+                             is_premium, premium_granted_at, premium_expires_at, premium_reason,
+                             is_banned, banned_at, ban_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setLong(1, user.telegramId)
+                    stmt.setString(2, user.language)
+                    stmt.setString(3, user.keywords)
+                    stmt.setString(4, user.ignoreKeywords)
+                    stmt.setString(5, user.lastInteraction.format(dateFormatter))
+                    stmt.setInt(6, if (user.isPremium) 1 else 0)
+                    stmt.setString(7, user.premiumGrantedAt?.format(dateFormatter))
+                    stmt.setString(8, user.premiumExpiresAt?.format(dateFormatter))
+                    stmt.setString(9, user.premiumReason)
+                    stmt.setInt(10, if (user.isBanned) 1 else 0)
+                    stmt.setString(11, user.bannedAt?.format(dateFormatter))
+                    stmt.setString(12, user.banReason)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to create user ${user.telegramId}" }
+            false
+        }
+    }
     
-    // Admin operations
-    fun banUser(userId: Long, reason: String, bannedByAdmin: Long): Boolean = 
-        adminRepository.banUser(userId, reason, bannedByAdmin)
-    fun unbanUser(userId: Long): Boolean = adminRepository.unbanUser(userId)
-    fun isUserBanned(userId: Long): Boolean = adminRepository.isUserBanned(userId)
-    fun getBannedUser(userId: Long): BannedUser? = adminRepository.getBannedUser(userId)
-    fun getAllBannedUsers(): List<BannedUser> = adminRepository.getAllBannedUsers()
-    fun getUserInfo(userId: Long): UserInfo? = adminRepository.getUserInfo(userId)
+    fun updateUser(user: User): Boolean {
+        val sql = """
+            UPDATE users SET 
+                language = ?, keywords = ?, ignore_keywords = ?, last_interaction = ?,
+                is_premium = ?, premium_granted_at = ?, premium_expires_at = ?, premium_reason = ?,
+                is_banned = ?, banned_at = ?, ban_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE telegram_id = ?
+        """
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setString(1, user.language)
+                    stmt.setString(2, user.keywords)
+                    stmt.setString(3, user.ignoreKeywords)
+                    stmt.setString(4, user.lastInteraction.format(dateFormatter))
+                    stmt.setInt(5, if (user.isPremium) 1 else 0)
+                    stmt.setString(6, user.premiumGrantedAt?.format(dateFormatter))
+                    stmt.setString(7, user.premiumExpiresAt?.format(dateFormatter))
+                    stmt.setString(8, user.premiumReason)
+                    stmt.setInt(9, if (user.isBanned) 1 else 0)
+                    stmt.setString(10, user.bannedAt?.format(dateFormatter))
+                    stmt.setString(11, user.banReason)
+                    stmt.setLong(12, user.telegramId)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to update user ${user.telegramId}" }
+            false
+        }
+    }
     
-    // Premium operations
-    fun grantPremium(userId: Long, grantedByAdmin: Long, reason: String? = null): Boolean = 
-        premiumRepository.grantPremium(userId, grantedByAdmin, reason)
-    fun revokePremium(userId: Long, revokedByAdmin: Long, reason: String? = null): Boolean = 
-        premiumRepository.revokePremium(userId, revokedByAdmin, reason)
-    fun isPremiumUser(userId: Long): Boolean = premiumRepository.isPremiumUser(userId)
-    fun getPremiumUser(userId: Long): PremiumUser? = premiumRepository.getPremiumUser(userId)
-    fun getAllPremiumUsers(): List<PremiumUserInfo> = premiumRepository.getAllPremiumUsers()
-    fun getPremiumUserCount(): Int = premiumRepository.getPremiumUserCount()
+    fun getAllUsers(): List<User> {
+        val sql = "SELECT * FROM users WHERE keywords IS NOT NULL"
+        val users = mutableListOf<User>()
+        
+        try {
+            getConnection().use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery(sql).use { rs ->
+                        while (rs.next()) {
+                            users.add(
+                                User(
+                                    telegramId = rs.getLong("telegram_id"),
+                                    language = rs.getString("language"),
+                                    keywords = rs.getString("keywords"),
+                                    ignoreKeywords = rs.getString("ignore_keywords"),
+                                    lastInteraction = LocalDateTime.parse(rs.getString("last_interaction"), dateFormatter),
+                                    isPremium = rs.getInt("is_premium") == 1,
+                                    premiumGrantedAt = rs.getString("premium_granted_at")?.let { 
+                                        LocalDateTime.parse(it, dateFormatter) 
+                                    },
+                                    premiumExpiresAt = rs.getString("premium_expires_at")?.let { 
+                                        LocalDateTime.parse(it, dateFormatter) 
+                                    },
+                                    premiumReason = rs.getString("premium_reason"),
+                                    isBanned = rs.getInt("is_banned") == 1,
+                                    bannedAt = rs.getString("banned_at")?.let { 
+                                        LocalDateTime.parse(it, dateFormatter) 
+                                    },
+                                    banReason = rs.getString("ban_reason"),
+                                    createdAt = LocalDateTime.parse(rs.getString("created_at"), dateFormatter),
+                                    updatedAt = LocalDateTime.parse(rs.getString("updated_at"), dateFormatter)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get all users" }
+        }
+        
+        return users
+    }
+    
+    fun getActiveUsersCount(): Int {
+        val sql = "SELECT COUNT(*) FROM users WHERE keywords IS NOT NULL"
+        
+        return try {
+            getConnection().use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery(sql).use { rs ->
+                        rs.getInt(1)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get active users count" }
+            0
+        }
+    }
+    
+    fun updateUserActivity(telegramId: Long) {
+        val sql = """
+            UPDATE users SET 
+                last_interaction = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE telegram_id = ?
+        """
+        
+        try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setLong(1, telegramId)
+                    stmt.executeUpdate()
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to update user activity for $telegramId" }
+        }
+    }
+    
+    // ===============================
+    // PREMIUM OPERATIONS (INTEGRATED)
+    // ===============================
+    
+    fun grantPremium(userId: Long, reason: String, durationDays: Int? = null): Boolean {
+        val sql = """
+            UPDATE users SET 
+                is_premium = 1,
+                premium_granted_at = CURRENT_TIMESTAMP,
+                premium_expires_at = CASE 
+                    WHEN ? IS NULL THEN NULL 
+                    ELSE DATETIME('now', '+' || ? || ' days')
+                END,
+                premium_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE telegram_id = ?
+        """
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setObject(1, durationDays)
+                    stmt.setObject(2, durationDays)
+                    stmt.setString(3, reason)
+                    stmt.setLong(4, userId)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to grant premium to user $userId" }
+            false
+        }
+    }
+    
+    fun revokePremium(userId: Long): Boolean {
+        val sql = """
+            UPDATE users SET 
+                is_premium = 0,
+                premium_granted_at = NULL,
+                premium_expires_at = NULL,
+                premium_reason = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE telegram_id = ?
+        """
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setLong(1, userId)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to revoke premium from user $userId" }
+            false
+        }
+    }
+    
+    fun extendPremium(userId: Long, additionalDays: Int): Boolean {
+        val sql = """
+            UPDATE users SET 
+                premium_expires_at = CASE
+                    WHEN premium_expires_at IS NULL THEN 
+                        DATETIME('now', '+' || ? || ' days')
+                    ELSE 
+                        DATETIME(premium_expires_at, '+' || ? || ' days')
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE telegram_id = ? AND is_premium = 1
+        """
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setInt(1, additionalDays)
+                    stmt.setInt(2, additionalDays)
+                    stmt.setLong(3, userId)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to extend premium for user $userId" }
+            false
+        }
+    }
+    
+    fun isPremiumUser(userId: Long): Boolean {
+        val sql = """
+            SELECT 1 FROM users 
+            WHERE telegram_id = ? 
+            AND is_premium = 1 
+            AND (premium_expires_at IS NULL OR premium_expires_at > DATETIME('now'))
+        """
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setLong(1, userId)
+                    stmt.executeQuery().use { rs ->
+                        rs.next()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to check premium status for user $userId" }
+            false
+        }
+    }
+    
+    fun getAllPremiumUsers(): List<User> {
+        val sql = """
+            SELECT * FROM users 
+            WHERE is_premium = 1 
+            ORDER BY premium_granted_at DESC
+        """
+        val premiumUsers = mutableListOf<User>()
+        
+        try {
+            getConnection().use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery(sql).use { rs ->
+                        while (rs.next()) {
+                            premiumUsers.add(
+                                User(
+                                    telegramId = rs.getLong("telegram_id"),
+                                    language = rs.getString("language"),
+                                    keywords = rs.getString("keywords"),
+                                    ignoreKeywords = rs.getString("ignore_keywords"),
+                                    lastInteraction = LocalDateTime.parse(rs.getString("last_interaction"), dateFormatter),
+                                    isPremium = rs.getInt("is_premium") == 1,
+                                    premiumGrantedAt = rs.getString("premium_granted_at")?.let { 
+                                        LocalDateTime.parse(it, dateFormatter) 
+                                    },
+                                    premiumExpiresAt = rs.getString("premium_expires_at")?.let { 
+                                        LocalDateTime.parse(it, dateFormatter) 
+                                    },
+                                    premiumReason = rs.getString("premium_reason"),
+                                    isBanned = rs.getInt("is_banned") == 1,
+                                    bannedAt = rs.getString("banned_at")?.let { 
+                                        LocalDateTime.parse(it, dateFormatter) 
+                                    },
+                                    banReason = rs.getString("ban_reason"),
+                                    createdAt = LocalDateTime.parse(rs.getString("created_at"), dateFormatter),
+                                    updatedAt = LocalDateTime.parse(rs.getString("updated_at"), dateFormatter)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get all premium users" }
+        }
+        
+        return premiumUsers
+    }
+    
+    fun getPremiumUserCount(): Int {
+        val sql = "SELECT COUNT(*) FROM users WHERE is_premium = 1"
+        
+        return try {
+            getConnection().use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery(sql).use { rs ->
+                        if (rs.next()) rs.getInt(1) else 0
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get premium user count" }
+            0
+        }
+    }
+    
+    fun expireOldPremiumUsers(): Int {
+        val sql = """
+            UPDATE users SET 
+                is_premium = 0,
+                premium_granted_at = NULL,
+                premium_expires_at = NULL,
+                premium_reason = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE premium_expires_at IS NOT NULL 
+            AND premium_expires_at <= DATETIME('now')
+        """
+        
+        return try {
+            getConnection().use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeUpdate()
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to expire old premium users" }
+            0
+        }
+    }
+    
+    // ===============================
+    // BAN OPERATIONS (INTEGRATED)
+    // ===============================
+    
+    fun banUser(userId: Long, reason: String, bannedByAdmin: Long): Boolean {
+        val enhancedReason = "$reason (banned by admin $bannedByAdmin)"
+        val sql = """
+            UPDATE users SET 
+                is_banned = 1,
+                banned_at = CURRENT_TIMESTAMP,
+                ban_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE telegram_id = ?
+        """
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setString(1, enhancedReason)
+                    stmt.setLong(2, userId)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to ban user $userId" }
+            false
+        }
+    }
+    
+    fun unbanUser(userId: Long): Boolean {
+        val sql = """
+            UPDATE users SET 
+                is_banned = 0,
+                banned_at = NULL,
+                ban_reason = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE telegram_id = ?
+        """
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setLong(1, userId)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to unban user $userId" }
+            false
+        }
+    }
+    
+    fun isUserBanned(userId: Long): Boolean {
+        val sql = "SELECT 1 FROM users WHERE telegram_id = ? AND is_banned = 1"
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setLong(1, userId)
+                    stmt.executeQuery().use { rs ->
+                        rs.next()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to check if user is banned $userId" }
+            false
+        }
+    }
+    
+    fun getBannedUser(userId: Long): BannedInfo? {
+        val sql = "SELECT banned_at, ban_reason FROM users WHERE telegram_id = ? AND is_banned = 1"
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setLong(1, userId)
+                    stmt.executeQuery().use { rs ->
+                        if (rs.next()) {
+                            BannedInfo(
+                                bannedAt = LocalDateTime.parse(rs.getString("banned_at"), dateFormatter),
+                                reason = rs.getString("ban_reason")
+                            )
+                        } else null
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get banned user $userId" }
+            null
+        }
+    }
+    
+    fun getAllBannedUsers(): List<User> {
+        val sql = "SELECT * FROM users WHERE is_banned = 1 ORDER BY banned_at DESC"
+        val bannedUsers = mutableListOf<User>()
+        
+        try {
+            getConnection().use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery(sql).use { rs ->
+                        while (rs.next()) {
+                            bannedUsers.add(
+                                User(
+                                    telegramId = rs.getLong("telegram_id"),
+                                    language = rs.getString("language"),
+                                    keywords = rs.getString("keywords"),
+                                    ignoreKeywords = rs.getString("ignore_keywords"),
+                                    lastInteraction = LocalDateTime.parse(rs.getString("last_interaction"), dateFormatter),
+                                    isPremium = rs.getInt("is_premium") == 1,
+                                    premiumGrantedAt = rs.getString("premium_granted_at")?.let { 
+                                        LocalDateTime.parse(it, dateFormatter) 
+                                    },
+                                    premiumExpiresAt = rs.getString("premium_expires_at")?.let { 
+                                        LocalDateTime.parse(it, dateFormatter) 
+                                    },
+                                    premiumReason = rs.getString("premium_reason"),
+                                    isBanned = rs.getInt("is_banned") == 1,
+                                    bannedAt = rs.getString("banned_at")?.let { 
+                                        LocalDateTime.parse(it, dateFormatter) 
+                                    },
+                                    banReason = rs.getString("ban_reason"),
+                                    createdAt = LocalDateTime.parse(rs.getString("created_at"), dateFormatter),
+                                    updatedAt = LocalDateTime.parse(rs.getString("updated_at"), dateFormatter)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get all banned users" }
+        }
+        
+        return bannedUsers
+    }
+    
+    // Get comprehensive user info for admin purposes
+    fun getUserInfo(userId: Long): UserInfo? {
+        val user = getUser(userId)
+        
+        return user?.let {
+            UserInfo(
+                userId = it.telegramId,
+                username = null, // Will be filled by TelegramBot when needed
+                language = it.language,
+                isActive = it.keywords != null,
+                isBanned = it.isBanned,
+                bannedInfo = if (it.isBanned && it.bannedAt != null && it.banReason != null) {
+                    BannedInfo(it.bannedAt, it.banReason)
+                } else null,
+                lastActivity = it.lastInteraction,
+                isPremium = it.isPremium,
+                premiumInfo = if (it.isPremium && it.premiumGrantedAt != null) {
+                    PremiumInfo(
+                        grantedAt = it.premiumGrantedAt,
+                        expiresAt = it.premiumExpiresAt,
+                        reason = it.premiumReason,
+                        isActive = it.isPremiumActive,
+                        daysRemaining = it.premiumDaysRemaining
+                    )
+                } else null
+            )
+        }
+    }
+    
+    // ===============================
+    // CHANNEL OPERATIONS (UNCHANGED)
+    // ===============================
+    
+    fun addChannel(channelId: String, channelName: String?): Boolean {
+        val sql = "INSERT OR IGNORE INTO channels (channel_id, channel_name) VALUES (?, ?)"
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setString(1, channelId)
+                    stmt.setString(2, channelName)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to add channel $channelId" }
+            false
+        }
+    }
+    
+    fun addChannelWithDetails(channelId: String, channelTag: String?, channelName: String?): Boolean {
+        val sql = "INSERT OR REPLACE INTO channels (channel_id, channel_name, channel_tag) VALUES (?, ?, ?)"
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setString(1, channelId)
+                    stmt.setString(2, channelName)
+                    stmt.setString(3, channelTag)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to add channel $channelId with tag $channelTag" }
+            false
+        }
+    }
+    
+    fun findChannelIdByTag(channelTag: String): String? {
+        val cleanTag = channelTag.removePrefix("@").lowercase()
+        val sql = "SELECT channel_id FROM channels WHERE LOWER(REPLACE(channel_tag, '@', '')) = ?"
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setString(1, cleanTag)
+                    stmt.executeQuery().use { rs ->
+                        if (rs.next()) rs.getString("channel_id") else null
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to find channel by tag $channelTag" }
+            null
+        }
+    }
+    
+    fun updateChannelTag(channelId: String, newTag: String?, newName: String?): Boolean {
+        val sql = "UPDATE channels SET channel_tag = ?, channel_name = ?, updated_at = CURRENT_TIMESTAMP WHERE channel_id = ?"
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setString(1, newTag)
+                    stmt.setString(2, newName)
+                    stmt.setString(3, channelId)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to update channel tag for $channelId" }
+            false
+        }
+    }
+    
+    fun removeChannel(channelId: String): Boolean {
+        val sql = "DELETE FROM channels WHERE channel_id = ?"
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setString(1, channelId)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to remove channel $channelId" }
+            false
+        }
+    }
+    
+    fun removeChannelById(channelId: String): Boolean = removeChannel(channelId)
+    
+    fun getAllChannels(): List<Channel> {
+        val sql = "SELECT * FROM channels ORDER BY created_at ASC"
+        val channels = mutableListOf<Channel>()
+        
+        try {
+            getConnection().use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery(sql).use { rs ->
+                        while (rs.next()) {
+                            channels.add(
+                                Channel(
+                                    id = rs.getLong("id"),
+                                    channelId = rs.getString("channel_id"),
+                                    channelName = rs.getString("channel_name"),
+                                    createdAt = LocalDateTime.parse(rs.getString("created_at"), dateFormatter)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get all channels" }
+        }
+        
+        return channels
+    }
+    
+    fun getAllChannelsWithDetails(): List<ChannelDetails> {
+        val sql = "SELECT * FROM channels ORDER BY created_at ASC"
+        val channels = mutableListOf<ChannelDetails>()
+        
+        try {
+            getConnection().use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery(sql).use { rs ->
+                        while (rs.next()) {
+                            channels.add(
+                                ChannelDetails(
+                                    id = rs.getLong("id"),
+                                    channelId = rs.getString("channel_id"),
+                                    channelName = rs.getString("channel_name"),
+                                    channelTag = rs.getString("channel_tag"),
+                                    createdAt = LocalDateTime.parse(rs.getString("created_at"), dateFormatter),
+                                    updatedAt = rs.getString("updated_at")?.let { 
+                                        LocalDateTime.parse(it, dateFormatter) 
+                                    }
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get all channels with details" }
+        }
+        
+        return channels
+    }
+    
+    fun getAllChannelIds(): List<String> {
+        val sql = "SELECT channel_id FROM channels"
+        val channelIds = mutableListOf<String>()
+        
+        try {
+            getConnection().use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery(sql).use { rs ->
+                        while (rs.next()) {
+                            channelIds.add(rs.getString("channel_id"))
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to get all channel IDs" }
+        }
+        
+        return channelIds
+    }
+    
+    fun channelExists(channelId: String): Boolean {
+        val sql = "SELECT 1 FROM channels WHERE channel_id = ?"
+        
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement(sql).use { stmt ->
+                    stmt.setString(1, channelId)
+                    stmt.executeQuery().use { rs ->
+                        rs.next()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to check if channel exists $channelId" }
+            false
+        }
+    }
+    
+    fun channelExistsById(channelId: String): Boolean = channelExists(channelId)
     
     // ✅ MONITORING: Check pool health
     fun getPoolStats(): Map<String, Any> {

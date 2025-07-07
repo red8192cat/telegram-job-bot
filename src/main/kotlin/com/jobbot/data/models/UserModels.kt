@@ -1,77 +1,85 @@
 package com.jobbot.data.models
 
 import java.time.LocalDateTime
+import java.time.temporal.ChronoUnit
 
-// User-related data classes
+// UPDATED: Single simplified User model with all user data
 data class User(
-    val id: Long = 0,
     val telegramId: Long,
     val language: String = "en",
     val keywords: String? = null,
     val ignoreKeywords: String? = null,
+    val lastInteraction: LocalDateTime = LocalDateTime.now(),
+    
+    // Premium (simplified)
+    val isPremium: Boolean = false,
+    val premiumGrantedAt: LocalDateTime? = null,
+    val premiumExpiresAt: LocalDateTime? = null, // NULL = permanent
+    val premiumReason: String? = null,
+    
+    // Moderation (integrated)
+    val isBanned: Boolean = false,
+    val bannedAt: LocalDateTime? = null,
+    val banReason: String? = null,
+    
     val createdAt: LocalDateTime = LocalDateTime.now(),
     val updatedAt: LocalDateTime = LocalDateTime.now()
-)
+) {
+    // Helper properties for premium status
+    val isPremiumActive: Boolean
+        get() = isPremium && (premiumExpiresAt == null || premiumExpiresAt.isAfter(LocalDateTime.now()))
+    
+    val premiumDaysRemaining: Long?
+        get() = premiumExpiresAt?.let { 
+            val days = ChronoUnit.DAYS.between(LocalDateTime.now(), it)
+            if (days > 0) days else 0
+        }
+    
+    val premiumDaysTotal: Long?
+        get() = if (premiumGrantedAt != null && premiumExpiresAt != null) {
+            ChronoUnit.DAYS.between(premiumGrantedAt, premiumExpiresAt)
+        } else null
+    
+    val isPremiumExpired: Boolean
+        get() = isPremium && premiumExpiresAt != null && premiumExpiresAt.isBefore(LocalDateTime.now())
+    
+    val isPremiumPermanent: Boolean
+        get() = isPremium && premiumExpiresAt == null
+}
 
-data class UserActivity(
-    val id: Long = 0,
-    val userTelegramId: Long,
-    val lastInteraction: LocalDateTime = LocalDateTime.now(),
-    val commandCount: Int = 0,
-    val createdAt: LocalDateTime = LocalDateTime.now()
-)
+// REMOVED: UserActivity (merged into User)
+// REMOVED: BannedUser (merged into User) 
+// REMOVED: PremiumUser (merged into User)
+// REMOVED: PremiumUserInfo (merged into User)
 
-// Banned users model
-data class BannedUser(
-    val userId: Long,
-    val bannedAt: LocalDateTime = LocalDateTime.now(),
-    val reason: String,
-    val bannedByAdmin: Long
-)
-
-// Extended user info for admin purposes
+// KEPT: Extended user info for admin purposes (combines user data + additional metadata)
 data class UserInfo(
     val userId: Long,
     val username: String? = null,
     val language: String? = null,
     val isActive: Boolean = false,
     val isBanned: Boolean = false,
-    val bannedInfo: BannedUser? = null,
+    val bannedInfo: BannedInfo? = null,
     val lastActivity: LocalDateTime? = null,
-    val commandCount: Int = 0
+    val isPremium: Boolean = false,
+    val premiumInfo: PremiumInfo? = null
 )
 
-// Premium user data models
-
-/**
- * Basic premium user data from premium_users table
- */
-data class PremiumUser(
-    val userId: Long,
-    val grantedAt: LocalDateTime = LocalDateTime.now(),
-    val grantedByAdmin: Long,
-    val reason: String? = null,
-    val isActive: Boolean = true,
-    val revokedAt: LocalDateTime? = null,
-    val revokedByAdmin: Long? = null,
-    val revokeReason: String? = null
+// Simplified info structures for admin display
+data class BannedInfo(
+    val bannedAt: LocalDateTime,
+    val reason: String
 )
 
-/**
- * Extended premium user info for admin display
- * Includes calculated fields like days since premium
- */
-data class PremiumUserInfo(
-    val userId: Long,
+data class PremiumInfo(
     val grantedAt: LocalDateTime,
-    val grantedByAdmin: Long,
-    val reason: String? = null,
-    val daysSincePremium: Int = 0
+    val expiresAt: LocalDateTime?,
+    val reason: String?,
+    val isActive: Boolean,
+    val daysRemaining: Long?
 )
 
-/**
- * User lookup result from TDLib API for username resolution
- */
+// KEPT: User lookup result from TDLib API for username resolution
 data class UserLookupResult(
     val found: Boolean,
     val userId: Long?,

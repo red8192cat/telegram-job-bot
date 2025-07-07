@@ -138,6 +138,9 @@ class AdminCommandRouter(
             
             text.startsWith("/admin revoke_premium") -> 
                 premiumHandler.handleRevokePremium(chatId, text)
+
+            text.startsWith("/admin extend_premium") -> 
+                premiumHandler.handleExtendPremium(chatId, text)
             
             // Default: show help
             else -> dashboardHandler.handleAdminHelp(chatId)
