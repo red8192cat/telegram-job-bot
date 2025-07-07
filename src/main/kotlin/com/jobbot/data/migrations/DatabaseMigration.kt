@@ -199,15 +199,21 @@ class DatabaseMigration(private val logger: io.github.oshai.kotlinlogging.KLogge
         logger.info { "Migration 5: Ultra-simplified schema - consolidate all user data" }
         
         try {
-            // Step 1: Add new columns to users table
+            // Step 1: Add new columns to users table (SQLite-compatible defaults)
             logger.info { "Adding new columns to users table..." }
             addColumnIfNotExists(connection, "users", "is_banned", "INTEGER DEFAULT 0 CHECK (is_banned IN (0, 1))")
             addColumnIfNotExists(connection, "users", "banned_at", "DATETIME")
             addColumnIfNotExists(connection, "users", "ban_reason", "TEXT")
-            addColumnIfNotExists(connection, "users", "last_interaction", "DATETIME DEFAULT CURRENT_TIMESTAMP")
+            addColumnIfNotExists(connection, "users", "last_interaction", "DATETIME")
             addColumnIfNotExists(connection, "users", "premium_expires_at", "DATETIME")
             addColumnIfNotExists(connection, "users", "premium_reason", "TEXT")
             
+            // Step 1.5: Set default values for last_interaction where NULL
+            logger.info { "Setting default values for last_interaction..." }
+            connection.createStatement().execute("""
+                UPDATE users SET last_interaction = created_at 
+                WHERE last_interaction IS NULL
+            """)
             // Step 2: Migrate banned_users data if table exists
             if (tableExists(connection, "banned_users")) {
                 logger.info { "Migrating banned_users data..." }
@@ -221,7 +227,7 @@ class DatabaseMigration(private val logger: io.github.oshai.kotlinlogging.KLogge
                 """)
             }
             
-            // Step 3: Migrate user_activity data if table exists
+            // Step 3: Migrate user_activity data if table exists  
             if (tableExists(connection, "user_activity")) {
                 logger.info { "Migrating user_activity data..." }
                 connection.createStatement().execute("""
@@ -234,7 +240,14 @@ class DatabaseMigration(private val logger: io.github.oshai.kotlinlogging.KLogge
                 """)
             }
             
-            // Step 4: Migrate premium_users data if table exists and users.premium_granted_by exists
+            // Step 4: Set last_interaction for users without activity data
+            logger.info { "Setting last_interaction for remaining users..." }
+            connection.createStatement().execute("""
+                UPDATE users SET last_interaction = created_at 
+                WHERE last_interaction IS NULL
+            """)
+            
+            // Step 5: Migrate premium_users data if table exists and users.premium_granted_by exists
             if (tableExists(connection, "premium_users") && columnExists(connection, "users", "premium_granted_by")) {
                 logger.info { "Migrating premium_users data..." }
                 connection.createStatement().execute("""
@@ -248,15 +261,8 @@ class DatabaseMigration(private val logger: io.github.oshai.kotlinlogging.KLogge
                 """)
             }
             
-            // Step 5: Drop old columns if they exist
-            logger.info { "Cleaning up old columns and tables..." }
-            if (columnExists(connection, "users", "premium_granted_by")) {
-                // SQLite doesn't support DROP COLUMN directly, but we'll leave it for now
-                // It will be ignored in the new code
-                logger.info { "Note: premium_granted_by column left in place (will be ignored)" }
-            }
-            
             // Step 6: Drop old tables if they exist
+            logger.info { "Cleaning up old tables..." }
             if (tableExists(connection, "user_activity")) {
                 connection.createStatement().execute("DROP TABLE user_activity")
                 logger.info { "Dropped user_activity table" }
