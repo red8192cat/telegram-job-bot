@@ -61,7 +61,7 @@ class AdminPremiumHandler(
             val newUser = com.jobbot.data.models.User(telegramId = userId, language = "en")
             database.createUser(newUser)
         }
-        
+
         val success = database.grantPremium(userId, config.getFirstAdminId(), reason)
         
         return if (success) {
