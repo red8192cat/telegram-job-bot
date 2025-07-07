@@ -40,3 +40,31 @@ data class UserInfo(
     val lastActivity: LocalDateTime? = null,
     val commandCount: Int = 0
 )
+
+// Premium user data models
+
+/**
+ * Basic premium user data from premium_users table
+ */
+data class PremiumUser(
+    val userId: Long,
+    val grantedAt: LocalDateTime = LocalDateTime.now(),
+    val grantedByAdmin: Long,
+    val reason: String? = null,
+    val isActive: Boolean = true,
+    val revokedAt: LocalDateTime? = null,
+    val revokedByAdmin: Long? = null,
+    val revokeReason: String? = null
+)
+
+/**
+ * Extended premium user info for admin display
+ * Includes calculated fields like days since premium
+ */
+data class PremiumUserInfo(
+    val userId: Long,
+    val grantedAt: LocalDateTime,
+    val grantedByAdmin: Long,
+    val reason: String? = null,
+    val daysSincePremium: Int = 0
+)
