@@ -55,7 +55,7 @@ class AdminPremiumHandler(
         if (database.isPremiumUser(userId)) {
             return SendMessage.builder()
                 .chatId(chatId)
-                .text(Localization.getAdminMessage("admin.premium.grant.already.premium", userId))
+                .text(Localization.getAdminMessage("admin.premium.grant.already.premium", userId.toString()))
                 .build()
         }
         
@@ -73,7 +73,7 @@ class AdminPremiumHandler(
             val timestamp = java.time.LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
             SendMessage.builder()
                 .chatId(chatId)
-                .text(Localization.getAdminMessage("admin.premium.grant.success", userId, reason, timestamp))
+                .text(Localization.getAdminMessage("admin.premium.grant.success", userId.toString(), reason, timestamp))
                 .build()
         } else {
             SendMessage.builder()
@@ -112,7 +112,7 @@ class AdminPremiumHandler(
         if (!database.isPremiumUser(userId)) {
             return SendMessage.builder()
                 .chatId(chatId)
-                .text(Localization.getAdminMessage("admin.premium.revoke.not.premium", userId))
+                .text(Localization.getAdminMessage("admin.premium.revoke.not.premium", userId.toString()))
                 .build()
         }
         
@@ -123,7 +123,7 @@ class AdminPremiumHandler(
             val timestamp = java.time.LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
             SendMessage.builder()
                 .chatId(chatId)
-                .text(Localization.getAdminMessage("admin.premium.revoke.success", userId, reason, timestamp))
+                .text(Localization.getAdminMessage("admin.premium.revoke.success", userId.toString(), reason, timestamp))
                 .build()
         } else {
             SendMessage.builder()
