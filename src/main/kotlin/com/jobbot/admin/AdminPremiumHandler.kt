@@ -213,12 +213,11 @@ class AdminPremiumHandler(
             Localization.getAdminMessage("admin.premium.users.empty")
         } else {
             val usersList = premiumUsers.mapIndexed { index, premium ->
-                val userInfo = database.getUserInfo(premium.userId)
-                val username = userInfo?.username?.let { "(@$it)" } ?: Localization.getAdminMessage("admin.common.no.username")
                 val grantedTime = premium.grantedAt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
                 val reason = premium.reason ?: Localization.getAdminMessage("admin.common.no.reason")
                 
-                "${index + 1}. 👤 User: ${premium.userId} $username\n" +
+                // FIXED: Removed username lookup - just show user ID
+                "${index + 1}. 👤 User: ${premium.userId}\n" +
                 "   💎 Premium since: $grantedTime (${premium.daysSincePremium} days ago)\n" +
                 "   📝 Reason: $reason"
             }.joinToString("\n\n")
