@@ -473,7 +473,7 @@ class Database(private val databasePath: String) {
         return try {
             getConnection().use { conn ->
                 conn.createStatement().use { stmt ->
-                    stmt.executeUpdate()
+                    stmt.executeUpdate(sql)
                 }
             }
         } catch (e: Exception) {
