@@ -14,6 +14,7 @@ import java.time.format.DateTimeFormatter
 /**
  * Handles premium user management operations
  * BULLETPROOF: NO MARKDOWN - Works with any usernames, premium reasons, user data
+ * UPDATED: Support for @username and proper localization usage
  */
 class AdminPremiumHandler(
     private val database: Database,
@@ -22,7 +23,7 @@ class AdminPremiumHandler(
     private val logger = getLogger("AdminPremiumHandler")
     
     /**
-     * Grant premium to user - NO MARKDOWN (premium reasons can contain special chars)
+     * Grant premium to user - UPDATED: Support both user ID and @username
      */
     fun handleGrantPremium(chatId: String, text: String): SendMessage {
         val parts = text.substringAfter("/admin grant_premium").trim().split(" ", limit = 2)
@@ -31,18 +32,19 @@ class AdminPremiumHandler(
             return SendMessage.builder()
                 .chatId(chatId)
                 .text(Localization.getAdminMessage("admin.premium.grant.usage"))
-                // NO parseMode - bulletproof
                 .build()
         }
         
-        val userId = parts[0].toLongOrNull()
+        val userInput = parts[0]
         val reason = parts[1]
+        
+        // Resolve user ID from input (could be ID or @username)
+        val userId = resolveUserId(userInput)
         
         if (userId == null) {
             return SendMessage.builder()
                 .chatId(chatId)
-                .text(Localization.getAdminMessage("admin.premium.grant.invalid.id"))
-                // NO parseMode - bulletproof
+                .text(Localization.getAdminMessage("admin.premium.grant.invalid.user", userInput))
                 .build()
         }
         
@@ -51,7 +53,6 @@ class AdminPremiumHandler(
             return SendMessage.builder()
                 .chatId(chatId)
                 .text(Localization.getAdminMessage("admin.premium.grant.already.premium", userId))
-                // NO parseMode - user ID safe
                 .build()
         }
         
@@ -61,7 +62,7 @@ class AdminPremiumHandler(
             val newUser = com.jobbot.data.models.User(telegramId = userId, language = "en")
             database.createUser(newUser)
         }
-
+        
         val success = database.grantPremium(userId, config.getFirstAdminId(), reason)
         
         return if (success) {
@@ -70,19 +71,17 @@ class AdminPremiumHandler(
             SendMessage.builder()
                 .chatId(chatId)
                 .text(Localization.getAdminMessage("admin.premium.grant.success", userId, reason, timestamp))
-                // NO parseMode - premium reason can contain special chars
                 .build()
         } else {
             SendMessage.builder()
                 .chatId(chatId)
                 .text(Localization.getAdminMessage("admin.premium.grant.failed"))
-                // NO parseMode - bulletproof
                 .build()
         }
     }
     
     /**
-     * Revoke premium from user - NO MARKDOWN (handles user data)
+     * Revoke premium from user - UPDATED: Support both user ID and @username
      */
     fun handleRevokePremium(chatId: String, text: String): SendMessage {
         val parts = text.substringAfter("/admin revoke_premium").trim().split(" ", limit = 2)
@@ -91,18 +90,19 @@ class AdminPremiumHandler(
             return SendMessage.builder()
                 .chatId(chatId)
                 .text(Localization.getAdminMessage("admin.premium.revoke.usage"))
-                // NO parseMode - bulletproof
                 .build()
         }
         
-        val userId = parts[0].toLongOrNull()
+        val userInput = parts[0]
         val reason = if (parts.size > 1) parts[1] else "Revoked by admin"
+        
+        // Resolve user ID from input
+        val userId = resolveUserId(userInput)
         
         if (userId == null) {
             return SendMessage.builder()
                 .chatId(chatId)
-                .text(Localization.getAdminMessage("admin.premium.revoke.invalid.id"))
-                // NO parseMode - bulletproof
+                .text(Localization.getAdminMessage("admin.premium.revoke.invalid.user", userInput))
                 .build()
         }
         
@@ -110,7 +110,6 @@ class AdminPremiumHandler(
             return SendMessage.builder()
                 .chatId(chatId)
                 .text(Localization.getAdminMessage("admin.premium.revoke.not.premium", userId))
-                // NO parseMode - user ID safe
                 .build()
         }
         
@@ -122,19 +121,17 @@ class AdminPremiumHandler(
             SendMessage.builder()
                 .chatId(chatId)
                 .text(Localization.getAdminMessage("admin.premium.revoke.success", userId, reason, timestamp))
-                // NO parseMode - revoke reason can contain special chars
                 .build()
         } else {
             SendMessage.builder()
                 .chatId(chatId)
                 .text(Localization.getAdminMessage("admin.premium.revoke.failed"))
-                // NO parseMode - bulletproof
                 .build()
         }
     }
     
     /**
-     * Show premium users list - NO MARKDOWN (usernames can contain special chars)
+     * Show premium users list - UPDATED: Fixed number formatting for user IDs
      */
     fun handlePremiumUsers(chatId: String): SendMessage {
         val premiumUsers = database.getAllPremiumUsers()
@@ -151,15 +148,10 @@ class AdminPremiumHandler(
                 val grantedTime = premium.grantedAt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
                 val reason = premium.reason ?: Localization.getAdminMessage("admin.common.no.reason")
                 
-                Localization.getAdminMessage(
-                    "admin.premium.users.item",
-                    index + 1,
-                    premium.userId,
-                    username,
-                    grantedTime,
-                    premium.daysSincePremium,
-                    reason
-                )
+                // Build user item without number formatting placeholders
+                "${index + 1}. 👤 User: ${premium.userId} $username\n" +
+                "   💎 Premium since: $grantedTime (${premium.daysSincePremium} days ago)\n" +
+                "   📝 Reason: $reason"
             }.joinToString("\n\n")
             
             "${Localization.getAdminMessage("admin.premium.users.title")}\n" +
@@ -170,12 +162,57 @@ class AdminPremiumHandler(
         return SendMessage.builder()
             .chatId(chatId)
             .text(responseText)
-            // NO parseMode - usernames and reasons can contain special chars
             .build()
     }
     
     /**
-     * Create grant premium confirmation dialog - NO MARKDOWN (usernames can contain special chars)
+     * Resolve user ID from input (supports both user ID and @username)
+     */
+    private fun resolveUserId(input: String): Long? {
+        return when {
+            // If input is numeric, treat as user ID
+            input.matches(Regex("^[0-9]+$")) -> {
+                input.toLongOrNull()
+            }
+            
+            // If input starts with @, treat as username
+            input.startsWith("@") -> {
+                val username = input.substring(1) // Remove @
+                findUserByUsername(username)
+            }
+            
+            // Try as username without @
+            else -> {
+                findUserByUsername(input)
+            }
+        }
+    }
+    
+    /**
+     * Find user ID by username
+     */
+    private fun findUserByUsername(username: String): Long? {
+        return try {
+            // Get all users and check their usernames
+            val allUsers = database.getAllUsers()
+            
+            for (user in allUsers) {
+                val userInfo = database.getUserInfo(user.telegramId)
+                if (userInfo?.username?.equals(username, ignoreCase = true) == true) {
+                    return user.telegramId
+                }
+            }
+            
+            logger.warn { "User with username '$username' not found in database" }
+            null
+        } catch (e: Exception) {
+            logger.error(e) { "Error resolving username $username" }
+            null
+        }
+    }
+    
+    /**
+     * Create grant premium confirmation dialog
      */
     fun createGrantPremiumConfirmation(chatId: String, messageId: Int, userId: Long): EditMessageText {
         val userInfo = database.getUserInfo(userId)
@@ -226,13 +263,12 @@ class AdminPremiumHandler(
             .chatId(chatId)
             .messageId(messageId)
             .text("${Localization.getAdminMessage("admin.premium.grant.confirm.title")}\n\n$confirmText")
-            // NO parseMode - usernames can contain special chars
             .replyMarkup(InlineKeyboardMarkup.builder().keyboard(buttons).build())
             .build()
     }
     
     /**
-     * Handle revoke premium via callback - NO MARKDOWN (user data safe)
+     * Handle revoke premium via callback
      */
     fun handleRevokePremiumCallback(chatId: String, messageId: Int, userId: Long): EditMessageText {
         val success = database.revokePremium(userId, config.getFirstAdminId(), "Revoked via admin dashboard")
@@ -258,7 +294,6 @@ class AdminPremiumHandler(
             .chatId(chatId)
             .messageId(messageId)
             .text(resultText)
-            // NO parseMode - user data safe
             .replyMarkup(InlineKeyboardMarkup.builder().keyboard(buttons).build())
             .build()
     }
