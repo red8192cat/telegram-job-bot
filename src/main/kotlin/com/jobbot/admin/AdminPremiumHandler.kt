@@ -14,7 +14,7 @@ import java.time.format.DateTimeFormatter
 /**
  * Handles premium user management operations
  * BULLETPROOF: NO MARKDOWN - Works with any usernames, premium reasons, user data
- * UPDATED: Support for @username and proper localization usage
+ * UPDATED: Reason is optional, better username resolution with realistic limitations
  */
 class AdminPremiumHandler(
     private val database: Database,
@@ -23,12 +23,12 @@ class AdminPremiumHandler(
     private val logger = getLogger("AdminPremiumHandler")
     
     /**
-     * Grant premium to user - UPDATED: Support both user ID and @username
+     * Grant premium to user - UPDATED: Support both user ID and @username, reason is optional
      */
     fun handleGrantPremium(chatId: String, text: String): SendMessage {
         val parts = text.substringAfter("/admin grant_premium").trim().split(" ", limit = 2)
         
-        if (parts.size < 2 || parts[0].isBlank() || parts[1].isBlank()) {
+        if (parts.isEmpty() || parts[0].isBlank()) {
             return SendMessage.builder()
                 .chatId(chatId)
                 .text(Localization.getAdminMessage("admin.premium.grant.usage"))
@@ -36,7 +36,7 @@ class AdminPremiumHandler(
         }
         
         val userInput = parts[0]
-        val reason = parts[1]
+        val reason = if (parts.size > 1 && parts[1].isNotBlank()) parts[1] else "Premium access granted by admin"
         
         // Resolve user ID from input (could be ID or @username)
         val userId = resolveUserId(userInput)
@@ -81,7 +81,7 @@ class AdminPremiumHandler(
     }
     
     /**
-     * Revoke premium from user - UPDATED: Support both user ID and @username
+     * Revoke premium from user - UPDATED: Support both user ID and @username, reason is optional
      */
     fun handleRevokePremium(chatId: String, text: String): SendMessage {
         val parts = text.substringAfter("/admin revoke_premium").trim().split(" ", limit = 2)
@@ -94,7 +94,7 @@ class AdminPremiumHandler(
         }
         
         val userInput = parts[0]
-        val reason = if (parts.size > 1) parts[1] else "Revoked by admin"
+        val reason = if (parts.size > 1 && parts[1].isNotBlank()) parts[1] else "Premium access revoked by admin"
         
         // Resolve user ID from input
         val userId = resolveUserId(userInput)
@@ -167,6 +167,7 @@ class AdminPremiumHandler(
     
     /**
      * Resolve user ID from input (supports both user ID and @username)
+     * UPDATED: Better error handling and realistic expectations
      */
     private fun resolveUserId(input: String): Long? {
         return when {
@@ -190,23 +191,28 @@ class AdminPremiumHandler(
     
     /**
      * Find user ID by username
+     * UPDATED: More realistic implementation with better logging
      */
     private fun findUserByUsername(username: String): Long? {
         return try {
-            // Get all users and check their usernames
+            // LIMITATION: We can only find users who have interacted with our bot before
+            // The Telegram Bot API doesn't provide a way to lookup arbitrary users by username
+            
             val allUsers = database.getAllUsers()
             
             for (user in allUsers) {
                 val userInfo = database.getUserInfo(user.telegramId)
                 if (userInfo?.username?.equals(username, ignoreCase = true) == true) {
+                    logger.info { "Found user @$username with ID ${user.telegramId}" }
                     return user.telegramId
                 }
             }
             
-            logger.warn { "User with username '$username' not found in database" }
+            logger.warn { "User with username '@$username' not found in bot's database" }
+            logger.info { "LIMITATION: Bot can only find users who have previously interacted with it" }
             null
         } catch (e: Exception) {
-            logger.error(e) { "Error resolving username $username" }
+            logger.error(e) { "Error resolving username @$username" }
             null
         }
     }
