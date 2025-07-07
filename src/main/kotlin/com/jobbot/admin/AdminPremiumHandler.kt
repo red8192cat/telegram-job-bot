@@ -2,8 +2,10 @@ package com.jobbot.admin
 
 import com.jobbot.data.Database
 import com.jobbot.data.models.BotConfig
+import com.jobbot.bot.tdlib.TelegramUser
 import com.jobbot.shared.getLogger
 import com.jobbot.shared.localization.Localization
+import kotlinx.coroutines.runBlocking
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup
@@ -14,16 +16,17 @@ import java.time.format.DateTimeFormatter
 /**
  * Handles premium user management operations
  * BULLETPROOF: NO MARKDOWN - Works with any usernames, premium reasons, user data
- * UPDATED: Reason is optional, better username resolution with realistic limitations
+ * UPDATED: Uses TDLib for real-time username resolution + supports direct IDs
  */
 class AdminPremiumHandler(
     private val database: Database,
-    private val config: BotConfig
+    private val config: BotConfig,
+    private val telegramUser: TelegramUser?  // NEW: Add TelegramUser for username resolution
 ) {
     private val logger = getLogger("AdminPremiumHandler")
     
     /**
-     * Grant premium to user - UPDATED: Support both user ID and @username, reason is optional
+     * Grant premium to user - UPDATED: TDLib username resolution + direct ID support
      */
     fun handleGrantPremium(chatId: String, text: String): SendMessage {
         val parts = text.substringAfter("/admin grant_premium").trim().split(" ", limit = 2)
@@ -39,7 +42,7 @@ class AdminPremiumHandler(
         val reason = if (parts.size > 1 && parts[1].isNotBlank()) parts[1] else "Premium access granted by admin"
         
         // Resolve user ID from input (could be ID or @username)
-        val userId = resolveUserId(userInput)
+        val userId = resolveUserIdViaTdlib(userInput)
         
         if (userId == null) {
             return SendMessage.builder()
@@ -81,7 +84,7 @@ class AdminPremiumHandler(
     }
     
     /**
-     * Revoke premium from user - UPDATED: Support both user ID and @username, reason is optional
+     * Revoke premium from user - UPDATED: TDLib username resolution + direct ID support
      */
     fun handleRevokePremium(chatId: String, text: String): SendMessage {
         val parts = text.substringAfter("/admin revoke_premium").trim().split(" ", limit = 2)
@@ -97,7 +100,7 @@ class AdminPremiumHandler(
         val reason = if (parts.size > 1 && parts[1].isNotBlank()) parts[1] else "Premium access revoked by admin"
         
         // Resolve user ID from input
-        val userId = resolveUserId(userInput)
+        val userId = resolveUserIdViaTdlib(userInput)
         
         if (userId == null) {
             return SendMessage.builder()
@@ -131,7 +134,74 @@ class AdminPremiumHandler(
     }
     
     /**
-     * Show premium users list - UPDATED: Fixed number formatting for user IDs
+     * NEW: Resolve user ID from input using TDLib for @username or direct ID parsing
+     * Supports both direct IDs and TDLib username resolution
+     */
+    private fun resolveUserIdViaTdlib(input: String): Long? {
+        return when {
+            // If input is numeric, treat as direct user ID
+            input.matches(Regex("^[0-9]+$")) -> {
+                val userId = input.toLongOrNull()
+                if (userId != null && userId > 0) {
+                    logger.info { "Direct user ID provided: $userId" }
+                    userId
+                } else {
+                    logger.warn { "Invalid direct user ID: $input" }
+                    null
+                }
+            }
+            
+            // If input starts with @, use TDLib to resolve username
+            input.startsWith("@") -> {
+                val username = input.substring(1) // Remove @
+                resolveUsernameViaTdlib(username)
+            }
+            
+            // Try as username without @
+            else -> {
+                resolveUsernameViaTdlib(input)
+            }
+        }
+    }
+    
+    /**
+     * NEW: Use TDLib to resolve username to user ID in real-time
+     */
+    private fun resolveUsernameViaTdlib(username: String): Long? {
+        if (telegramUser == null) {
+            logger.warn { "TDLib not available for username resolution: @$username" }
+            return null
+        }
+        
+        if (!telegramUser.isConnected()) {
+            logger.warn { "TDLib not connected for username resolution: @$username" }
+            return null
+        }
+        
+        return try {
+            logger.info { "Resolving username @$username via TDLib..." }
+            
+            // Use TDLib to look up the user by username
+            val userInfo = runBlocking {
+                telegramUser.lookupUserByUsername(username)
+            }
+            
+            if (userInfo.found && userInfo.userId != null) {
+                logger.info { "TDLib resolved @$username to user ID: ${userInfo.userId}" }
+                userInfo.userId
+            } else {
+                logger.warn { "TDLib could not resolve @$username: ${userInfo.error ?: "User not found"}" }
+                null
+            }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error resolving username @$username via TDLib" }
+            null
+        }
+    }
+    
+    /**
+     * Show premium users list - Same as before, no changes needed
      */
     fun handlePremiumUsers(chatId: String): SendMessage {
         val premiumUsers = database.getAllPremiumUsers()
@@ -148,7 +218,6 @@ class AdminPremiumHandler(
                 val grantedTime = premium.grantedAt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
                 val reason = premium.reason ?: Localization.getAdminMessage("admin.common.no.reason")
                 
-                // Build user item without number formatting placeholders
                 "${index + 1}. 👤 User: ${premium.userId} $username\n" +
                 "   💎 Premium since: $grantedTime (${premium.daysSincePremium} days ago)\n" +
                 "   📝 Reason: $reason"
@@ -163,58 +232,6 @@ class AdminPremiumHandler(
             .chatId(chatId)
             .text(responseText)
             .build()
-    }
-    
-    /**
-     * Resolve user ID from input (supports both user ID and @username)
-     * UPDATED: Better error handling and realistic expectations
-     */
-    private fun resolveUserId(input: String): Long? {
-        return when {
-            // If input is numeric, treat as user ID
-            input.matches(Regex("^[0-9]+$")) -> {
-                input.toLongOrNull()
-            }
-            
-            // If input starts with @, treat as username
-            input.startsWith("@") -> {
-                val username = input.substring(1) // Remove @
-                findUserByUsername(username)
-            }
-            
-            // Try as username without @
-            else -> {
-                findUserByUsername(input)
-            }
-        }
-    }
-    
-    /**
-     * Find user ID by username
-     * UPDATED: More realistic implementation with better logging
-     */
-    private fun findUserByUsername(username: String): Long? {
-        return try {
-            // LIMITATION: We can only find users who have interacted with our bot before
-            // The Telegram Bot API doesn't provide a way to lookup arbitrary users by username
-            
-            val allUsers = database.getAllUsers()
-            
-            for (user in allUsers) {
-                val userInfo = database.getUserInfo(user.telegramId)
-                if (userInfo?.username?.equals(username, ignoreCase = true) == true) {
-                    logger.info { "Found user @$username with ID ${user.telegramId}" }
-                    return user.telegramId
-                }
-            }
-            
-            logger.warn { "User with username '@$username' not found in bot's database" }
-            logger.info { "LIMITATION: Bot can only find users who have previously interacted with it" }
-            null
-        } catch (e: Exception) {
-            logger.error(e) { "Error resolving username @$username" }
-            null
-        }
     }
     
     /**

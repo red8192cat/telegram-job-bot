@@ -68,3 +68,15 @@ data class PremiumUserInfo(
     val reason: String? = null,
     val daysSincePremium: Int = 0
 )
+
+/**
+ * User lookup result from TDLib API for username resolution
+ */
+data class UserLookupResult(
+    val found: Boolean,
+    val userId: Long?,
+    val username: String?,
+    val firstName: String?,
+    val lastName: String?,
+    val error: String? = null
+)

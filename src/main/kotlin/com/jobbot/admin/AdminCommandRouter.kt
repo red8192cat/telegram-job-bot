@@ -14,7 +14,7 @@ import org.telegram.telegrambots.meta.api.objects.message.Message
 
 /**
  * Main router for admin commands - coordinates between specialized handlers
- * 🔧 UPDATED: Now supports multiple admins AND premium management
+ * 🔧 UPDATED: Now supports multiple admins AND premium management with TDLib username resolution
  */
 class AdminCommandRouter(
     private val config: BotConfig,
@@ -30,7 +30,7 @@ class AdminCommandRouter(
     private val systemHandler = AdminSystemHandler(database, rateLimiter, telegramUser)
     private val userHandler = AdminUserHandler(database, config)
     private val authHandler = AdminAuthHandler(telegramUser)
-    private val premiumHandler = AdminPremiumHandler(database, config)  // NEW: Premium handler
+    private val premiumHandler = AdminPremiumHandler(database, config, telegramUser)  // UPDATED: Pass telegramUser
     
     private var bot: TelegramBot? = null
     
@@ -129,7 +129,7 @@ class AdminCommandRouter(
             text.startsWith("/admin auth_password") -> 
                 authHandler.handleAuthPassword(chatId, text)
             
-            // NEW: Premium management commands
+            // NEW: Premium management commands (with TDLib username support)
             text.startsWith("/admin premium_users") -> 
                 premiumHandler.handlePremiumUsers(chatId)
             

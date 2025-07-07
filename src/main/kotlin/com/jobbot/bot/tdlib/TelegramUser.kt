@@ -5,6 +5,7 @@ import com.jobbot.core.MessageProcessor
 import com.jobbot.data.Database
 import com.jobbot.data.models.BotConfig
 import com.jobbot.data.models.ChannelLookupResult
+import com.jobbot.data.models.UserLookupResult
 import com.jobbot.infrastructure.monitoring.ErrorTracker
 import com.jobbot.shared.getLogger
 import com.jobbot.shared.localization.Localization
@@ -253,6 +254,157 @@ class TelegramUser(
         } catch (e: Exception) {
             logger.error(e) { "Error with auth password" }
             Localization.getAdminMessage("admin.auth.code.error", e.message ?: "Unknown error")
+        }
+    }
+    
+    /**
+     * NEW: Lookup user information by username using TDLib
+     * Returns user ID and basic info for any public username
+     */
+    suspend fun lookupUserByUsername(username: String): UserLookupResult = withContext(Dispatchers.IO) {
+        return@withContext try {
+            logger.debug { "Looking up user info for: @$username" }
+
+            val cleanUsername = when {
+                username.startsWith("@") -> username.substring(1)
+                else -> username
+            }
+            
+            // Use CompletableDeferred for async response handling
+            val resultDeferred = CompletableDeferred<UserLookupResult>()
+            
+            // Search for the user by username
+            client?.send(TdApi.SearchPublicChat(cleanUsername)) { result ->
+                when (result) {
+                    is TdApi.Chat -> {
+                        // Check if this is actually a user (not a channel/group)
+                        when (val chatType = result.type) {
+                            is TdApi.ChatTypePrivate -> {
+                                // This is a private chat with a user - get the user ID
+                                val userId = chatType.userId
+                                
+                                // Now get detailed user info
+                                client?.send(TdApi.GetUser(userId)) { userResult ->
+                                    when (userResult) {
+                                        is TdApi.User -> {
+                                            logger.info { "TDLib found user @$cleanUsername with ID: $userId" }
+                                            
+                                            // Extract username from user object
+                                            val currentUsername = try {
+                                                val usernamesField = userResult.javaClass.getDeclaredField("usernames")
+                                                usernamesField.isAccessible = true
+                                                val usernames = usernamesField.get(userResult)
+                                                
+                                                if (usernames != null) {
+                                                    val editableUsernameField = usernames.javaClass.getDeclaredField("editableUsername")
+                                                    editableUsernameField.isAccessible = true
+                                                    editableUsernameField.get(usernames) as? String
+                                                } else null
+                                            } catch (e: Exception) {
+                                                logger.debug { "Could not extract username from user object: ${e.message}" }
+                                                cleanUsername // fallback to search term
+                                            }
+                                            
+                                            resultDeferred.complete(
+                                                UserLookupResult(
+                                                    found = true,
+                                                    userId = userId,
+                                                    username = currentUsername ?: cleanUsername,
+                                                    firstName = userResult.firstName,
+                                                    lastName = userResult.lastName
+                                                )
+                                            )
+                                        }
+                                        is TdApi.Error -> {
+                                            logger.warn { "Failed to get user details for @$cleanUsername: ${userResult.message}" }
+                                            resultDeferred.complete(
+                                                UserLookupResult(
+                                                    found = false,
+                                                    userId = null,
+                                                    username = null,
+                                                    firstName = null,
+                                                    lastName = null,
+                                                    error = "Failed to get user details: ${userResult.message}"
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            is TdApi.ChatTypeSupergroup -> {
+                                logger.warn { "@$cleanUsername is a supergroup/channel, not a user" }
+                                resultDeferred.complete(
+                                    UserLookupResult(
+                                        found = false,
+                                        userId = null,
+                                        username = null,
+                                        firstName = null,
+                                        lastName = null,
+                                        error = "@$cleanUsername is a channel/group, not a user"
+                                    )
+                                )
+                            }
+                            
+                            else -> {
+                                logger.warn { "@$cleanUsername is not a user chat" }
+                                resultDeferred.complete(
+                                    UserLookupResult(
+                                        found = false,
+                                        userId = null,
+                                        username = null,
+                                        firstName = null,
+                                        lastName = null,
+                                        error = "@$cleanUsername is not a user"
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    
+                    is TdApi.Error -> {
+                        logger.warn { "User search failed for @$cleanUsername: ${result.message}" }
+                        resultDeferred.complete(
+                            UserLookupResult(
+                                found = false,
+                                userId = null,
+                                username = null,
+                                firstName = null,
+                                lastName = null,
+                                error = result.message
+                            )
+                        )
+                    }
+                }
+            }
+            
+            // Wait for result with timeout
+            try {
+                withTimeout(10000) { // 10 second timeout
+                    resultDeferred.await()
+                }
+            } catch (e: TimeoutCancellationException) {
+                logger.warn { "User lookup timeout for: @$cleanUsername" }
+                UserLookupResult(
+                    found = false,
+                    userId = null,
+                    username = null,
+                    firstName = null,
+                    lastName = null,
+                    error = "Lookup timeout"
+                )
+            }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to lookup user info for @$username" }
+            UserLookupResult(
+                found = false,
+                userId = null,
+                username = null,
+                firstName = null,
+                lastName = null,
+                error = e.message
+            )
         }
     }
     
