@@ -13,8 +13,8 @@ import org.drinkless.tdlib.TdApi
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Handles TDLib message monitoring and processing
- * Extracted from TelegramUser.kt
+ * Handles TDLib message monitoring and processing with robust formatting support
+ * Strategy: Extract rich formatting with conservative escaping and safety checks
  */
 class ChannelMonitor(
     private val database: Database,
@@ -24,7 +24,7 @@ class ChannelMonitor(
     private val logger = getLogger("ChannelMonitor")
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     
-    // FIXED: Bounded cache with automatic cleanup
+    // Bounded cache with automatic cleanup
     private val channelIdCache = object : LinkedHashMap<String, Long>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean {
             return size > 500 // Keep max 500 entries
@@ -60,35 +60,18 @@ class ChannelMonitor(
                 
                 logger.info { "Processing message from monitored chat: $channelId (type: ${if (message.isChannelPost) "channel" else "group"})" }
                 
-                val textContent = when (val content = message.content) {
-                    is TdApi.MessageText -> {
-                        logger.debug { "Text message content: ${content.text.text}" }
-                        content.text.text
-                    }
-                    is TdApi.MessagePhoto -> {
-                        logger.debug { "Photo message with caption: ${content.caption?.text}" }
-                        content.caption?.text ?: ""
-                    }
-                    is TdApi.MessageVideo -> {
-                        logger.debug { "Video message with caption: ${content.caption?.text}" }
-                        content.caption?.text ?: ""
-                    }
-                    is TdApi.MessageDocument -> {
-                        logger.debug { "Document message with caption: ${content.caption?.text}" }
-                        content.caption?.text ?: ""
-                    }
-                    else -> {
-                        logger.debug { "Unsupported message type: ${content.javaClass.simpleName}" }
-                        return
-                    }
-                }
+                // Extract both plain text and formatted text
+                val (plainText, formattedText) = extractMessageContent(message.content)
                 
-                if (textContent.isBlank()) {
+                if (plainText.isBlank()) {
                     logger.debug { "Message has no text content, skipping" }
                     return
                 }
                 
-                logger.debug { "Processing text content: '$textContent'" }
+                logger.debug { "Processing plain text: '$plainText'" }
+                if (formattedText != plainText) {
+                    logger.debug { "Generated formatted text with ${formattedText.length - plainText.length} additional markup characters" }
+                }
                 
                 scope.launch {
                     try {
@@ -106,11 +89,13 @@ class ChannelMonitor(
                         // Generate message link
                         val messageLink = generateMessageLink(channelDetails, message.id)
                         
+                        // Create ChannelMessage with both plain and formatted text
                         val channelMessage = ChannelMessage(
                             channelId = channelId,
                             channelName = displayName,
                             messageId = message.id,
-                            text = textContent,
+                            text = plainText, // For keyword matching
+                            formattedText = formattedText, // For user notifications
                             senderUsername = senderUsername,
                             messageLink = messageLink
                         )
@@ -138,6 +123,208 @@ class ChannelMonitor(
         } catch (e: Exception) {
             logger.error(e) { "Error in handleNewMessage" }
             ErrorTracker.logError("ERROR", "New message handler error: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * Extract both plain text and formatted text from message content
+     * Returns Pair<plainText, formattedText>
+     */
+    private fun extractMessageContent(content: TdApi.MessageContent): Pair<String, String> {
+        return when (content) {
+            is TdApi.MessageText -> {
+                val plainText = content.text.text
+                val formattedText = convertFormattedTextToMarkdown(content.text)
+                logger.debug { "Text message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
+                Pair(plainText, formattedText)
+            }
+            is TdApi.MessagePhoto -> {
+                val plainText = content.caption?.text ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                logger.debug { "Photo message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
+                Pair(plainText, formattedText)
+            }
+            is TdApi.MessageVideo -> {
+                val plainText = content.caption?.text ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                logger.debug { "Video message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
+                Pair(plainText, formattedText)
+            }
+            is TdApi.MessageDocument -> {
+                val plainText = content.caption?.text ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                logger.debug { "Document message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
+                Pair(plainText, formattedText)
+            }
+            else -> {
+                logger.debug { "Unsupported message type: ${content.javaClass.simpleName}" }
+                Pair("", "")
+            }
+        }
+    }
+    
+    /**
+     * CONSERVATIVE: Convert TDLib FormattedText to MarkdownV2 with safety-first approach
+     * Only handles the most reliable formatting types, skips risky ones
+     */
+    private fun convertFormattedTextToMarkdown(formattedText: TdApi.FormattedText): String {
+        if (formattedText.entities.isEmpty()) {
+            return formattedText.text
+        }
+        
+        try {
+            val text = formattedText.text
+            val entities = formattedText.entities.sortedBy { it.offset }
+            val result = StringBuilder()
+            var currentPos = 0
+            
+            for (entity in entities) {
+                // Add text before this entity
+                if (entity.offset > currentPos) {
+                    result.append(safeEscape(text.substring(currentPos, entity.offset)))
+                }
+                
+                // Get the entity text
+                val entityText = text.substring(entity.offset, entity.offset + entity.length)
+                
+                // CONSERVATIVE: Only handle the safest formatting types
+                when (entity.type) {
+                    is TdApi.TextEntityTypeBold -> {
+                        result.append("*${safeEscapeForFormatting(entityText)}*")
+                    }
+                    
+                    is TdApi.TextEntityTypeItalic -> {
+                        result.append("_${safeEscapeForFormatting(entityText)}_")
+                    }
+                    
+                    is TdApi.TextEntityTypeCode -> {
+                        // Code is usually safe, just wrap it
+                        result.append("`${entityText}`")
+                    }
+                    
+                    is TdApi.TextEntityTypePre -> {
+                        // Pre-formatted code blocks
+                        result.append("```\n${entityText}\n```")
+                    }
+                    
+                    is TdApi.TextEntityTypeTextUrl -> {
+                        // Only include URLs if they look safe
+                        if (isSafeUrl(entity.type.url)) {
+                            result.append("[${safeEscapeForFormatting(entityText)}](${entity.type.url})")
+                        } else {
+                            result.append("${safeEscape(entityText)} (${entity.type.url})")
+                        }
+                    }
+                    
+                    // CONSERVATIVE: Skip risky formatting types
+                    is TdApi.TextEntityTypeUnderline,
+                    is TdApi.TextEntityTypeStrikethrough,
+                    is TdApi.TextEntityTypeSpoiler -> {
+                        logger.debug { "Skipping risky formatting: ${entity.type.javaClass.simpleName}" }
+                        result.append(safeEscape(entityText))
+                    }
+                    
+                    // Keep safe entities as-is
+                    is TdApi.TextEntityTypeMention,
+                    is TdApi.TextEntityTypeHashtag,
+                    is TdApi.TextEntityTypeCashtag -> {
+                        result.append(entityText) // These are usually safe
+                    }
+                    
+                    else -> {
+                        logger.debug { "Unknown entity type: ${entity.type.javaClass.simpleName}" }
+                        result.append(safeEscape(entityText))
+                    }
+                }
+                
+                currentPos = entity.offset + entity.length
+            }
+            
+            // Add remaining text
+            if (currentPos < text.length) {
+                result.append(safeEscape(text.substring(currentPos)))
+            }
+            
+            val finalResult = result.toString()
+            
+            // SAFETY CHECK: If result looks risky, return plain text
+            if (looksRisky(finalResult)) {
+                logger.debug { "Generated markdown looks risky, returning plain text" }
+                return formattedText.text
+            }
+            
+            return finalResult
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Error converting formatted text, using plain text" }
+            return formattedText.text
+        }
+    }
+    
+    /**
+     * CONSERVATIVE escaping - only escape the most essential characters
+     */
+    private fun safeEscape(text: String): String {
+        return text
+            .replace("\\", "\\\\")  // Escape backslashes first
+            .replace("*", "\\*")    // Bold markers
+            .replace("_", "\\_")    // Italic markers  
+            .replace("[", "\\[")    // Link brackets
+            .replace("]", "\\]")
+            .replace("(", "\\(")    // Link parentheses
+            .replace(")", "\\)")
+            .replace("`", "\\`")    // Code markers
+    }
+    
+    /**
+     * CONSERVATIVE escaping for text inside formatting (less aggressive)
+     */
+    private fun safeEscapeForFormatting(text: String): String {
+        return text
+            .replace("\\", "\\\\")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+            .replace("(", "\\(")
+            .replace(")", "\\)")
+    }
+    
+    /**
+     * Check if a URL looks safe to include in markdown
+     */
+    private fun isSafeUrl(url: String): Boolean {
+        return try {
+            url.startsWith("http://") || 
+            url.startsWith("https://") ||
+            url.startsWith("tg://")
+        } catch (e: Exception) {
+            false
+        }
+    }
+    
+    /**
+     * Final safety check - does the generated markdown look risky?
+     */
+    private fun looksRisky(markdown: String): Boolean {
+        return try {
+            // Check for unbalanced brackets/parens
+            val openBrackets = markdown.count { it == '[' }
+            val closeBrackets = markdown.count { it == ']' }
+            val openParens = markdown.count { it == '(' }
+            val closeParens = markdown.count { it == ')' }
+            
+            // Check for excessive escaping
+            val backslashes = markdown.count { it == '\\' }
+            val totalChars = markdown.length
+            
+            // Simple heuristics for "risky" content
+            openBrackets != closeBrackets ||
+            openParens != closeParens ||
+            backslashes > totalChars / 10 ||  // More than 10% backslashes
+            markdown.contains("\\\\\\") ||    // Triple backslashes
+            markdown.length > 4000            // Too long
+            
+        } catch (e: Exception) {
+            true // If we can't check, assume it's risky
         }
     }
     
@@ -238,7 +425,7 @@ class ChannelMonitor(
         }
     }
     
-    // FIXED: Safer tag extraction without dangerous reflection
+    // Safer tag extraction without dangerous reflection
     fun extractChannelTag(chat: TdApi.Chat, client: Client?): String? {
         return try {
             when (val chatType = chat.type) {
@@ -375,7 +562,7 @@ class ChannelMonitor(
         return channelIdCache[channelId]
     }
     
-    // FIXED: Add cache cleanup method
+    // Add cache cleanup method
     fun cleanupCache() {
         if (channelIdCache.size > 400) {
             logger.debug { "Cleaning up channel ID cache (${channelIdCache.size} entries)" }
