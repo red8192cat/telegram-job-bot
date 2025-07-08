@@ -91,48 +91,47 @@ class ChannelMonitor(
                 logger.debug { "Processing text content: '$textContent'" }
                 
                 scope.launch {
-                                    try {
-                                        // Get channel details
-                                        val channelDetails = database.getAllChannelsWithDetails().find { it.channelId == channelId }
-                                        val displayName = when {
-                                            !channelDetails?.channelTag.isNullOrBlank() -> channelDetails!!.channelTag!!
-                                            !channelDetails?.channelName.isNullOrBlank() -> channelDetails!!.channelName!!
-                                            else -> if (message.isChannelPost) "Channel" else "Group"
-                                        }
-                                        
-                                        val senderUsername = extractSenderUsername(message, client)
-                                        logger.debug { "Creating ChannelMessage with senderUsername: $senderUsername" }
-                                        
-                                        // Generate message link using TDLib's built-in method (async)
-                                        val messageLink = generateMessageLink(channelDetails, message.id, client)
-                                        logger.debug { "Generated message link: $messageLink" }
-                                        
-                                        val channelMessage = ChannelMessage(
-                                            channelId = channelId,
-                                            channelName = displayName,
-                                            messageId = message.id,
-                                            text = textContent,
-                                            senderUsername = senderUsername,
-                                            messageLink = messageLink
-                                        )
-                                        
-                                        logger.debug { "Calling messageProcessor.processChannelMessage..." }
-                                        val notifications = messageProcessor.processChannelMessage(channelMessage)
-                                        
-                                        logger.info { "Message processing complete. Generated ${notifications.size} notifications" }
-                                        
-                                        // Queue notifications
-                                        for (notification in notifications) {
-                                            logger.debug { "Queueing notification for user ${notification.userId}" }
-                                            bot?.queueNotification(notification)
-                                        }
-                                        
-                                        logger.debug { "Processed message from monitored chat $channelId, generated ${notifications.size} notifications" }
-                                    } catch (e: Exception) {
-                                        logger.error(e) { "Error processing new message" }
-                                        ErrorTracker.logError("ERROR", "Message processing error: ${e.message}", e)
-                                    }
-                                }
+                    try {
+                        // Get channel details
+                        val channelDetails = database.getAllChannelsWithDetails().find { it.channelId == channelId }
+                        val displayName = when {
+                            !channelDetails?.channelTag.isNullOrBlank() -> channelDetails!!.channelTag!!
+                            !channelDetails?.channelName.isNullOrBlank() -> channelDetails!!.channelName!!
+                            else -> if (message.isChannelPost) "Channel" else "Group"
+                        }
+                        
+                        val senderUsername = extractSenderUsername(message, client)
+                        logger.debug { "Creating ChannelMessage with senderUsername: $senderUsername" }
+                        
+                        // Generate message link
+                        val messageLink = generateMessageLink(channelDetails, message.id)
+                        
+                        val channelMessage = ChannelMessage(
+                            channelId = channelId,
+                            channelName = displayName,
+                            messageId = message.id,
+                            text = textContent,
+                            senderUsername = senderUsername,
+                            messageLink = messageLink
+                        )
+                        
+                        logger.debug { "Calling messageProcessor.processChannelMessage..." }
+                        val notifications = messageProcessor.processChannelMessage(channelMessage)
+                        
+                        logger.info { "Message processing complete. Generated ${notifications.size} notifications" }
+                        
+                        // Queue notifications
+                        for (notification in notifications) {
+                            logger.debug { "Queueing notification for user ${notification.userId}" }
+                            bot?.queueNotification(notification)
+                        }
+                        
+                        logger.debug { "Processed message from monitored chat $channelId, generated ${notifications.size} notifications" }
+                    } catch (e: Exception) {
+                        logger.error(e) { "Error processing new message" }
+                        ErrorTracker.logError("ERROR", "Message processing error: ${e.message}", e)
+                    }
+                }
             } else {
                 logger.debug { "Ignoring message from unmonitored chat $chatId (isChannelPost: ${message.isChannelPost})" }
             }
@@ -312,69 +311,58 @@ class ChannelMonitor(
     }
     
     /**
-     * Generate a Telegram message link using TDLib's built-in method
+     * Generate a Telegram message link with proper TDLib to Bot API message ID conversion
      */
-    private suspend fun generateMessageLink(channelDetails: ChannelDetails?, messageId: Long, client: Client?): String? {
+    private fun generateMessageLink(channelDetails: ChannelDetails?, tdlibMessageId: Long): String? {
         return try {
-            logger.debug { "Generating message link using TDLib for channel: ${channelDetails?.channelId}, messageId: $messageId" }
+            if (channelDetails == null) return null
             
-            if (channelDetails == null || client == null) {
-                logger.debug { "Cannot generate link: channelDetails=$channelDetails, client=$client" }
+            // Convert TDLib message ID to Bot API message ID
+            val publicMessageId = convertTdlibToPublicMessageId(tdlibMessageId)
+            if (publicMessageId == null) {
+                logger.debug { "Could not convert TDLib message ID $tdlibMessageId to public ID - skipping link generation" }
                 return null
             }
             
-            val chatId = channelDetails.channelId.toLongOrNull()
-            if (chatId == null) {
-                logger.warn { "Invalid chat ID: ${channelDetails.channelId}" }
-                return null
-            }
+            logger.debug { "Converted TDLib ID $tdlibMessageId to public ID $publicMessageId" }
             
-            // Use TDLib's getPublicMessageLink method
-            val deferred = CompletableDeferred<String?>()
-            
-            // Try getPublicMessageLink first (for public channels/groups)
-            client.send(TdApi.GetPublicMessageLink(chatId, messageId, false, false)) { result ->
-                when (result) {
-                    is TdApi.PublicMessageLink -> {
-                        logger.info { "Successfully got public message link: ${result.link}" }
-                        deferred.complete(result.link)
-                    }
-                    is TdApi.Error -> {
-                        logger.debug { "getPublicMessageLink failed: ${result.message}, trying getMessageLink..." }
-                        
-                        // Fallback: try getMessageLink (for any message)
-                        client.send(TdApi.GetMessageLink(chatId, messageId, 0, false)) { linkResult ->
-                            when (linkResult) {
-                                is TdApi.MessageLink -> {
-                                    if (linkResult.link.isNotEmpty()) {
-                                        logger.info { "Successfully got message link: ${linkResult.link}" }
-                                        deferred.complete(linkResult.link)
-                                    } else {
-                                        logger.debug { "getMessageLink returned empty link" }
-                                        deferred.complete(null)
-                                    }
-                                }
-                                is TdApi.Error -> {
-                                    logger.debug { "getMessageLink also failed: ${linkResult.message}" }
-                                    deferred.complete(null)
-                                }
-                            }
-                        }
-                    }
+            when {
+                // For public channels with @username
+                !channelDetails.channelTag.isNullOrBlank() -> {
+                    val cleanTag = channelDetails.channelTag.removePrefix("@")
+                    if (cleanTag.isNotEmpty()) {
+                        "https://t.me/$cleanTag/$publicMessageId"
+                    } else null
                 }
-            }
-            
-            // Wait for result with timeout
-            try {
-                withTimeout(5000) { deferred.await() }
-            } catch (e: TimeoutCancellationException) {
-                logger.debug { "Timeout getting message link for chat $chatId, message $messageId" }
-                null
+                
+                // For supergroups with -100 prefix
+                channelDetails.channelId.startsWith("-100") -> {
+                    val chatId = channelDetails.channelId.substring(4) // Remove "-100"
+                    "https://t.me/c/$chatId/$publicMessageId"
+                }
+                
+                else -> null
             }
             
         } catch (e: Exception) {
-            logger.warn(e) { "Exception during TDLib link generation for channel ${channelDetails?.channelId}, message $messageId" }
+            logger.debug { "Failed to generate message link: ${e.message}" }
             null
+        }
+    }
+    
+    /**
+     * Convert TDLib message ID to Bot API/public message ID
+     * TDLib message ID = Bot API message ID * 1048576 (2^20)
+     * Bot API message ID = TDLib message ID / 1048576 (if divisible)
+     */
+    private fun convertTdlibToPublicMessageId(tdlibMessageId: Long): Long? {
+        val SHIFT_FACTOR = 1048576L // 2^20
+        
+        return if (tdlibMessageId % SHIFT_FACTOR == 0L) {
+            val publicMessageId = tdlibMessageId / SHIFT_FACTOR
+            if (publicMessageId > 0) publicMessageId else null
+        } else {
+            null // Local-only message, no public ID
         }
     }
     
