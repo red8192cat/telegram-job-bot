@@ -31,7 +31,8 @@ class MessageProcessor(private val database: Database) {
                             userId = user.telegramId,
                             channelName = message.channelName ?: message.channelId,
                             messageText = message.text,
-                            senderUsername = message.senderUsername  // ✅ FIXED: Include sender username
+                            senderUsername = message.senderUsername,
+                            messageLink = message.messageLink  // NEW: Pass through the message link
                         )
                     )
                     

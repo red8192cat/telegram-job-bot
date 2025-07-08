@@ -9,7 +9,8 @@ data class ChannelMessage(
     val messageId: Long,
     val text: String,
     val timestamp: LocalDateTime = LocalDateTime.now(),
-    val senderUsername: String? = null
+    val senderUsername: String? = null,
+    val messageLink: String? = null
 )
 
 data class NotificationMessage(
@@ -17,7 +18,8 @@ data class NotificationMessage(
     val channelName: String,
     val messageText: String,
     val priority: Int = 0,
-    val senderUsername: String? = null
+    val senderUsername: String? = null,
+    val messageLink: String? = null
 )
 
 // Keyword processing models

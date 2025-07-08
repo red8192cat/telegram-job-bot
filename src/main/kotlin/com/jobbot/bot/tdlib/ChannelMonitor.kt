@@ -4,6 +4,7 @@ import com.jobbot.bot.TelegramBot
 import com.jobbot.core.MessageProcessor
 import com.jobbot.data.Database
 import com.jobbot.data.models.ChannelMessage
+import com.jobbot.data.models.ChannelDetails
 import com.jobbot.infrastructure.monitoring.ErrorTracker
 import com.jobbot.shared.getLogger
 import kotlinx.coroutines.*
@@ -102,12 +103,16 @@ class ChannelMonitor(
                         val senderUsername = extractSenderUsername(message, client)
                         logger.debug { "Creating ChannelMessage with senderUsername: $senderUsername" }
                         
+                        // Generate message link
+                        val messageLink = generateMessageLink(channelDetails, message.id)
+                        
                         val channelMessage = ChannelMessage(
                             channelId = channelId,
                             channelName = displayName,
                             messageId = message.id,
                             text = textContent,
-                            senderUsername = senderUsername
+                            senderUsername = senderUsername,
+                            messageLink = messageLink
                         )
                         
                         logger.debug { "Calling messageProcessor.processChannelMessage..." }
@@ -301,6 +306,39 @@ class ChannelMonitor(
             identifier
         } catch (e: Exception) {
             logger.error(e) { "Failed to get channel identifier for chat $chatId" }
+            null
+        }
+    }
+    
+    /**
+     * Generate a Telegram message link for the post
+     * Format: https://t.me/channelname/messageId or https://t.me/c/channelId/messageId
+     */
+    private fun generateMessageLink(channelDetails: ChannelDetails?, messageId: Long): String? {
+        return try {
+            when {
+                // If we have a channel tag (e.g., @channelname), use it
+                !channelDetails?.channelTag.isNullOrBlank() -> {
+                    val cleanTag = channelDetails!!.channelTag!!.removePrefix("@")
+                    "https://t.me/$cleanTag/$messageId"
+                }
+                
+                // If channel ID starts with -100, it's a supergroup/channel
+                channelDetails?.channelId?.startsWith("-100") == true -> {
+                    val chatId = channelDetails.channelId.removePrefix("-100")
+                    "https://t.me/c/$chatId/$messageId"
+                }
+                
+                // For other channel IDs, try the basic format
+                channelDetails?.channelId != null -> {
+                    val chatId = channelDetails.channelId.removePrefix("-")
+                    "https://t.me/c/$chatId/$messageId"
+                }
+                
+                else -> null
+            }
+        } catch (e: Exception) {
+            logger.debug { "Failed to generate message link for channel ${channelDetails?.channelId}, message $messageId: ${e.message}" }
             null
         }
     }

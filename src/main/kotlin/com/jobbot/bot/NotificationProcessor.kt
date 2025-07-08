@@ -95,20 +95,36 @@ class NotificationProcessor(
             val jobText = TextUtils.truncateText(notification.messageText, 4000)
             
             val messageText = if (senderText.isNotBlank()) {
-                // Format: Header + Sender + Job Content
-                Localization.getMessage(
+                // Format: Header + Sender + Job Content + Link
+                val baseMessage = Localization.getMessage(
                     language,
                     "notification.job.match.header",
                     notification.channelName
                 ) + "\n$senderText\n\n$jobText"
+                
+                // Add link if available (using localized text)
+                if (!notification.messageLink.isNullOrBlank()) {
+                    val linkText = Localization.getMessage(language, "notification.link.text", notification.messageLink)
+                    "$baseMessage\n\n$linkText"
+                } else {
+                    baseMessage
+                }
             } else {
-                // Format: Header + Job Content (no sender)
-                Localization.getMessage(
+                // Format: Header + Job Content + Link (no sender)
+                val baseMessage = Localization.getMessage(
                     language,
                     "notification.job.match",
                     notification.channelName,
                     jobText
                 )
+                
+                // Add link if available (using localized text)
+                if (!notification.messageLink.isNullOrBlank()) {
+                    val linkText = Localization.getMessage(language, "notification.link.text", notification.messageLink)
+                    "$baseMessage\n\n$linkText"
+                } else {
+                    baseMessage
+                }
             }
             
             val sendMessage = SendMessage.builder()
