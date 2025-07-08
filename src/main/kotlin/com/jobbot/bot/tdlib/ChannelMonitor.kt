@@ -187,7 +187,7 @@ class ChannelMonitor(
                 // Get the entity text
                 val entityText = text.substring(entity.offset, entity.offset + entity.length)
                 
-                // CONSERVATIVE: Only handle the safest formatting types
+                // COMPREHENSIVE: Handle all the formatting types you want
                 when (entity.type) {
                     is TdApi.TextEntityTypeBold -> {
                         result.append("*${safeEscapeForFormatting(entityText)}*")
@@ -197,14 +197,42 @@ class ChannelMonitor(
                         result.append("_${safeEscapeForFormatting(entityText)}_")
                     }
                     
+                    is TdApi.TextEntityTypeUnderline -> {
+                        result.append("__${safeEscapeForFormatting(entityText)}__")
+                    }
+                    
+                    is TdApi.TextEntityTypeStrikethrough -> {
+                        result.append("~${safeEscapeForFormatting(entityText)}~")
+                    }
+                    
                     is TdApi.TextEntityTypeCode -> {
-                        // Code is usually safe, just wrap it
+                        // Monospace - inline code
                         result.append("`${entityText}`")
                     }
                     
                     is TdApi.TextEntityTypePre -> {
-                        // Pre-formatted code blocks
+                        // Monospace - code blocks
                         result.append("```\n${entityText}\n```")
+                    }
+                    
+                    is TdApi.TextEntityTypePreCode -> {
+                        // Code blocks with language
+                        val preCode = entity.type as TdApi.TextEntityTypePreCode
+                        result.append("```${preCode.language}\n${entityText}\n```")
+                    }
+                    
+                    is TdApi.TextEntityTypeSpoiler -> {
+                        result.append("||${safeEscapeForFormatting(entityText)}||")
+                    }
+                    
+                    is TdApi.TextEntityTypeBlockQuote -> {
+                        // Quote - use blockquote syntax
+                        result.append(">${safeEscapeForFormatting(entityText)}")
+                    }
+                    
+                    is TdApi.TextEntityTypeExpandableBlockQuote -> {
+                        // Expandable quote - treat as regular quote
+                        result.append(">${safeEscapeForFormatting(entityText)}")
                     }
                     
                     is TdApi.TextEntityTypeTextUrl -> {
@@ -215,14 +243,6 @@ class ChannelMonitor(
                         } else {
                             result.append("${safeEscape(entityText)} (${textUrl.url})")
                         }
-                    }
-                    
-                    // CONSERVATIVE: Skip risky formatting types
-                    is TdApi.TextEntityTypeUnderline,
-                    is TdApi.TextEntityTypeStrikethrough,
-                    is TdApi.TextEntityTypeSpoiler -> {
-                        logger.debug { "Skipping risky formatting: ${entity.type.javaClass.simpleName}" }
-                        result.append(safeEscape(entityText))
                     }
                     
                     // Keep safe entities as-is
@@ -263,30 +283,42 @@ class ChannelMonitor(
     }
     
     /**
-     * CONSERVATIVE escaping - only escape the most essential characters
+     * COMPREHENSIVE escaping - handle all special MarkdownV2 characters
      */
     private fun safeEscape(text: String): String {
         return text
             .replace("\\", "\\\\")  // Escape backslashes first
             .replace("*", "\\*")    // Bold markers
             .replace("_", "\\_")    // Italic markers  
+            .replace("~", "\\~")    // Strikethrough markers
+            .replace("|", "\\|")    // Spoiler markers
+            .replace(">", "\\>")    // Quote markers
             .replace("[", "\\[")    // Link brackets
             .replace("]", "\\]")
             .replace("(", "\\(")    // Link parentheses
             .replace(")", "\\)")
             .replace("`", "\\`")    // Code markers
+            .replace("#", "\\#")    // Header markers (just in case)
+            .replace("+", "\\+")    // Plus signs
+            .replace("-", "\\-")    // Minus signs
+            .replace("=", "\\=")    // Equal signs
+            .replace(".", "\\.")    // Dots
+            .replace("!", "\\!")    // Exclamation marks
     }
     
     /**
-     * CONSERVATIVE escaping for text inside formatting (less aggressive)
+     * COMPREHENSIVE escaping for text inside formatting (more selective)
      */
     private fun safeEscapeForFormatting(text: String): String {
         return text
-            .replace("\\", "\\\\")
-            .replace("[", "\\[")
+            .replace("\\", "\\\\")  // Always escape backslashes
+            .replace("[", "\\[")    // Link brackets
             .replace("]", "\\]")
-            .replace("(", "\\(")
+            .replace("(", "\\(")    // Link parentheses  
             .replace(")", "\\)")
+            .replace("`", "\\`")    // Code markers (can break formatting)
+            // Don't escape the current formatting character inside itself
+            // MarkdownV2 handles this automatically for most cases
     }
     
     /**
@@ -304,6 +336,7 @@ class ChannelMonitor(
     
     /**
      * Final safety check - does the generated markdown look risky?
+     * Updated for comprehensive formatting support
      */
     private fun looksRisky(markdown: String): Boolean {
         return try {
@@ -313,16 +346,27 @@ class ChannelMonitor(
             val openParens = markdown.count { it == '(' }
             val closeParens = markdown.count { it == ')' }
             
+            // Check for unbalanced formatting markers
+            val spoilerMarkers = markdown.count { it == '|' }
+            val tildeCount = markdown.count { it == '~' }
+            val asteriskCount = markdown.count { it == '*' }
+            val underscoreCount = markdown.count { it == '_' }
+            
             // Check for excessive escaping
             val backslashes = markdown.count { it == '\\' }
             val totalChars = markdown.length
             
-            // Simple heuristics for "risky" content
+            // Enhanced heuristics for "risky" content
             openBrackets != closeBrackets ||
             openParens != closeParens ||
-            backslashes > totalChars / 10 ||  // More than 10% backslashes
+            spoilerMarkers % 2 != 0 ||     // Spoilers must be paired
+            tildeCount % 2 != 0 ||         // Strikethrough must be paired
+            backslashes > totalChars / 8 ||  // More than 12.5% backslashes (was 10%)
             markdown.contains("\\\\\\") ||    // Triple backslashes
-            markdown.length > 4000            // Too long
+            markdown.length > 4000 ||         // Too long
+            markdown.contains("|||") ||       // Triple pipes (broken spoilers)
+            markdown.contains("~~~") ||       // Triple tildes (broken strikethrough)
+            markdown.contains("```\n```")     // Empty code blocks
             
         } catch (e: Exception) {
             true // If we can't check, assume it's risky
