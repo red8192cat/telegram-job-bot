@@ -314,31 +314,83 @@ class ChannelMonitor(
      * Generate a Telegram message link for the post
      * Format: https://t.me/channelname/messageId or https://t.me/c/channelId/messageId
      */
+    /**
+     * Generate a Telegram message link for the post with enhanced debugging and validation
+     */
     private fun generateMessageLink(channelDetails: ChannelDetails?, messageId: Long): String? {
         return try {
-            when {
-                // If we have a channel tag (e.g., @channelname), use it
-                !channelDetails?.channelTag.isNullOrBlank() -> {
-                    val cleanTag = channelDetails!!.channelTag!!.removePrefix("@")
-                    "https://t.me/$cleanTag/$messageId"
-                }
-                
-                // If channel ID starts with -100, it's a supergroup/channel
-                channelDetails?.channelId?.startsWith("-100") == true -> {
-                    val chatId = channelDetails.channelId.removePrefix("-100")
-                    "https://t.me/c/$chatId/$messageId"
-                }
-                
-                // For other channel IDs, try the basic format
-                channelDetails?.channelId != null -> {
-                    val chatId = channelDetails.channelId.removePrefix("-")
-                    "https://t.me/c/$chatId/$messageId"
-                }
-                
-                else -> null
+            logger.info { "=== LINK GENERATION DEBUG ===" }
+            logger.info { "Channel ID: ${channelDetails?.channelId}" }
+            logger.info { "Channel Tag: ${channelDetails?.channelTag}" }
+            logger.info { "Channel Name: ${channelDetails?.channelName}" }
+            logger.info { "Message ID: $messageId" }
+            
+            // Validate inputs first
+            if (channelDetails == null) {
+                logger.warn { "Cannot generate link: channelDetails is null" }
+                return null
             }
+            
+            if (messageId <= 0) {
+                logger.warn { "Cannot generate link: invalid messageId $messageId" }
+                return null
+            }
+            
+            val link = when {
+                // Case 1: Public channel with username (@channelname)
+                !channelDetails.channelTag.isNullOrBlank() -> {
+                    val cleanTag = channelDetails.channelTag.removePrefix("@")
+                    if (cleanTag.isBlank()) {
+                        logger.warn { "Channel tag is empty after removing @: '${channelDetails.channelTag}'" }
+                        null
+                    } else {
+                        val generatedLink = "https://t.me/$cleanTag/$messageId"
+                        logger.info { "Generated PUBLIC channel link: $generatedLink" }
+                        generatedLink
+                    }
+                }
+                
+                // Case 2: Supergroup/Channel with -100 prefix
+                channelDetails.channelId.startsWith("-100") -> {
+                    if (channelDetails.channelId.length < 5) {
+                        logger.warn { "Channel ID too short: ${channelDetails.channelId}" }
+                        null
+                    } else {
+                        val chatId = channelDetails.channelId.substring(4) // Remove "-100"
+                        val generatedLink = "https://t.me/c/$chatId/$messageId"
+                        logger.info { "Generated SUPERGROUP/CHANNEL link: $generatedLink" }
+                        generatedLink
+                    }
+                }
+                
+                // Case 3: Regular group (negative but not -100)
+                channelDetails.channelId.startsWith("-") && !channelDetails.channelId.startsWith("-100") -> {
+                    logger.warn { "Regular group detected: ${channelDetails.channelId}. These links may not work for external users." }
+                    val chatId = channelDetails.channelId.substring(1) // Remove "-"
+                    val generatedLink = "https://t.me/c/$chatId/$messageId"
+                    logger.info { "Generated GROUP link (may not work): $generatedLink" }
+                    generatedLink
+                }
+                
+                // Case 4: Positive ID (shouldn't happen for channels)
+                !channelDetails.channelId.startsWith("-") -> {
+                    logger.warn { "Positive chat ID detected: ${channelDetails.channelId}. This is unusual for channels/groups." }
+                    null
+                }
+                
+                else -> {
+                    logger.warn { "Unknown channel ID format: ${channelDetails.channelId}" }
+                    null
+                }
+            }
+            
+            logger.info { "Final link result: $link" }
+            logger.info { "=== END LINK GENERATION DEBUG ===" }
+            
+            return link
+            
         } catch (e: Exception) {
-            logger.debug { "Failed to generate message link for channel ${channelDetails?.channelId}, message $messageId: ${e.message}" }
+            logger.error(e) { "Exception during link generation for channel ${channelDetails?.channelId}, message $messageId" }
             null
         }
     }
