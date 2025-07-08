@@ -10,6 +10,7 @@ import com.jobbot.shared.utils.TextUtils
 import kotlinx.coroutines.*
 import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage
+import org.telegram.telegrambots.meta.api.objects.LinkPreviewOptions
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException
 import java.util.concurrent.LinkedBlockingQueue
 
@@ -102,7 +103,7 @@ class NotificationProcessor(
                     notification.channelName
                 ) + "\n$senderText\n\n$jobText"
                 
-                // Add link if available (using localized text)
+                // Add clickable link if available (using localized text)
                 if (!notification.messageLink.isNullOrBlank()) {
                     val linkText = Localization.getMessage(language, "notification.link.text", notification.messageLink)
                     "$baseMessage\n\n$linkText"
@@ -118,7 +119,7 @@ class NotificationProcessor(
                     jobText
                 )
                 
-                // Add link if available (using localized text)
+                // Add clickable link if available (using localized text)
                 if (!notification.messageLink.isNullOrBlank()) {
                     val linkText = Localization.getMessage(language, "notification.link.text", notification.messageLink)
                     "$baseMessage\n\n$linkText"
@@ -130,7 +131,10 @@ class NotificationProcessor(
             val sendMessage = SendMessage.builder()
                 .chatId(notification.userId.toString())
                 .text(messageText)
-                // NO parseMode - job content has special characters
+                // Disable link preview for cleaner notifications
+                .linkPreviewOptions(LinkPreviewOptions.builder()
+                    .isDisabled(true)
+                    .build())
                 .build()
 
             withContext(Dispatchers.IO) {
