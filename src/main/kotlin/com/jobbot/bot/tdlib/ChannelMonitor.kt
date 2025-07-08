@@ -7,14 +7,15 @@ import com.jobbot.data.models.ChannelMessage
 import com.jobbot.data.models.ChannelDetails
 import com.jobbot.infrastructure.monitoring.ErrorTracker
 import com.jobbot.shared.getLogger
+import com.jobbot.shared.utils.TelegramMarkdownConverter
 import kotlinx.coroutines.*
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Handles TDLib message monitoring and processing with robust formatting support
- * Strategy: Extract rich formatting with conservative escaping and safety checks
+ * Handles TDLib message monitoring and processing with ENHANCED MarkdownV2 formatting support
+ * Strategy: Extract rich formatting using integrated converter + TDLib entity parsing
  */
 class ChannelMonitor(
     private val database: Database,
@@ -164,12 +165,13 @@ class ChannelMonitor(
     }
     
     /**
-     * CONSERVATIVE: Convert TDLib FormattedText to MarkdownV2 with safety-first approach
-     * Only handles the most reliable formatting types, skips risky ones
+     * ENHANCED: Convert TDLib FormattedText to MarkdownV2 using integrated converter
+     * Strategy: Use TDLib entity information + enhanced converter for better results
      */
     private fun convertFormattedTextToMarkdown(formattedText: TdApi.FormattedText): String {
         if (formattedText.entities.isEmpty()) {
-            return formattedText.text
+            // No entities - just escape the plain text safely
+            return TelegramMarkdownConverter.escapeMarkdownV2(formattedText.text)
         }
         
         try {
@@ -179,82 +181,113 @@ class ChannelMonitor(
             var currentPos = 0
             
             for (entity in entities) {
-                // Add text before this entity
+                // Add text before this entity (properly escaped)
                 if (entity.offset > currentPos) {
-                    result.append(safeEscape(text.substring(currentPos, entity.offset)))
+                    result.append(TelegramMarkdownConverter.escapeMarkdownV2(
+                        text.substring(currentPos, entity.offset)
+                    ))
                 }
                 
                 // Get the entity text
                 val entityText = text.substring(entity.offset, entity.offset + entity.length)
                 
-                // COMPREHENSIVE: Handle all the formatting types you want
+                // Handle different entity types with enhanced converter
                 when (entity.type) {
                     is TdApi.TextEntityTypeBold -> {
-                        result.append("*${safeEscapeForFormatting(entityText)}*")
+                        result.append("*${TelegramMarkdownConverter.escapeForFormatting(entityText)}*")
                     }
                     
                     is TdApi.TextEntityTypeItalic -> {
-                        result.append("_${safeEscapeForFormatting(entityText)}_")
+                        result.append("_${TelegramMarkdownConverter.escapeForFormatting(entityText)}_")
                     }
                     
                     is TdApi.TextEntityTypeUnderline -> {
-                        result.append("__${safeEscapeForFormatting(entityText)}__")
+                        result.append("__${TelegramMarkdownConverter.escapeForFormatting(entityText)}__")
                     }
                     
                     is TdApi.TextEntityTypeStrikethrough -> {
-                        result.append("~${safeEscapeForFormatting(entityText)}~")
+                        result.append("~${TelegramMarkdownConverter.escapeForFormatting(entityText)}~")
                     }
                     
                     is TdApi.TextEntityTypeCode -> {
-                        // Monospace - inline code
-                        result.append("`${entityText}`")
+                        // Inline code - use converter's code escaping
+                        val escapedCode = entityText.replace("\\", "\\\\").replace("`", "\\`")
+                        result.append("`$escapedCode`")
                     }
                     
                     is TdApi.TextEntityTypePre -> {
-                        // Monospace - code blocks
-                        result.append("```\n${entityText}\n```")
+                        // Pre-formatted code block
+                        val escapedCode = entityText.replace("\\", "\\\\").replace("`", "\\`")
+                        result.append("```\n$escapedCode\n```")
                     }
                     
                     is TdApi.TextEntityTypePreCode -> {
-                        // Code blocks with language
+                        // Code block with language
                         val preCode = entity.type as TdApi.TextEntityTypePreCode
-                        result.append("```${preCode.language}\n${entityText}\n```")
+                        val escapedCode = entityText.replace("\\", "\\\\").replace("`", "\\`")
+                        result.append("```${preCode.language}\n$escapedCode\n```")
                     }
                     
                     is TdApi.TextEntityTypeSpoiler -> {
-                        result.append("||${safeEscapeForFormatting(entityText)}||")
+                        result.append("||${TelegramMarkdownConverter.escapeForFormatting(entityText)}||")
                     }
                     
                     is TdApi.TextEntityTypeBlockQuote -> {
-                        // Quote - use blockquote syntax
-                        result.append(">${safeEscapeForFormatting(entityText)}")
+                        // Block quote - split into lines and add > to each
+                        val lines = entityText.split("\n")
+                        val quotedLines = lines.map { line -> 
+                            ">${TelegramMarkdownConverter.escapeForFormatting(line)}" 
+                        }.joinToString("\n")
+                        result.append(quotedLines)
                     }
                     
                     is TdApi.TextEntityTypeExpandableBlockQuote -> {
-                        // Expandable quote - treat as regular quote
-                        result.append(">${safeEscapeForFormatting(entityText)}")
+                        // Expandable quote - treat as regular quote with special marker
+                        val lines = entityText.split("\n")
+                        val quotedLines = lines.map { line -> 
+                            ">${TelegramMarkdownConverter.escapeForFormatting(line)}" 
+                        }.joinToString("\n")
+                        result.append("**$quotedLines||")
                     }
                     
                     is TdApi.TextEntityTypeTextUrl -> {
-                        // Only include URLs if they look safe
                         val textUrl = entity.type as TdApi.TextEntityTypeTextUrl
-                        if (isSafeUrl(textUrl.url)) {
-                            result.append("[${safeEscapeForFormatting(entityText)}](${textUrl.url})")
-                        } else {
-                            result.append("${safeEscape(entityText)} (${textUrl.url})")
-                        }
+                        // Use converter's URL escaping
+                        val escapedText = TelegramMarkdownConverter.escapeForFormatting(entityText)
+                        val escapedUrl = TelegramMarkdownConverter.escapeUrlInLink(textUrl.url)
+                        result.append("[$escapedText]($escapedUrl)")
                     }
                     
-                    // Keep safe entities as-is
-                    is TdApi.TextEntityTypeMention,
+                    is TdApi.TextEntityTypeUrl -> {
+                        // Plain URL - just escape it
+                        result.append(TelegramMarkdownConverter.escapeMarkdownV2(entityText))
+                    }
+                    
+                    is TdApi.TextEntityTypeMention -> {
+                        // @username mention - safe to include as-is
+                        result.append(entityText)
+                    }
+                    
+                    is TdApi.TextEntityTypeMentionName -> {
+                        // User mention - convert to inline mention
+                        val mentionName = entity.type as TdApi.TextEntityTypeMentionName
+                        val escapedText = TelegramMarkdownConverter.escapeForFormatting(entityText)
+                        result.append("[$escapedText](tg://user?id=${mentionName.userId})")
+                    }
+                    
                     is TdApi.TextEntityTypeHashtag,
-                    is TdApi.TextEntityTypeCashtag -> {
-                        result.append(entityText) // These are usually safe
+                    is TdApi.TextEntityTypeCashtag,
+                    is TdApi.TextEntityTypeBotCommand,
+                    is TdApi.TextEntityTypePhoneNumber,
+                    is TdApi.TextEntityTypeEmailAddress -> {
+                        // These are generally safe - just escape them normally
+                        result.append(TelegramMarkdownConverter.escapeMarkdownV2(entityText))
                     }
                     
                     else -> {
+                        // Unknown entity type - escape normally
                         logger.debug { "Unknown entity type: ${entity.type.javaClass.simpleName}" }
-                        result.append(safeEscape(entityText))
+                        result.append(TelegramMarkdownConverter.escapeMarkdownV2(entityText))
                     }
                 }
                 
@@ -263,113 +296,22 @@ class ChannelMonitor(
             
             // Add remaining text
             if (currentPos < text.length) {
-                result.append(safeEscape(text.substring(currentPos)))
+                result.append(TelegramMarkdownConverter.escapeMarkdownV2(text.substring(currentPos)))
             }
             
             val finalResult = result.toString()
             
-            // SAFETY CHECK: If result looks risky, return plain text
-            if (looksRisky(finalResult)) {
-                logger.debug { "Generated markdown looks risky, returning plain text" }
-                return formattedText.text
+            // Use converter's validation
+            if (TelegramMarkdownConverter.hasUnbalancedMarkup(finalResult)) {
+                logger.debug { "Generated markdown has unbalanced markup, returning escaped plain text" }
+                return TelegramMarkdownConverter.escapeMarkdownV2(formattedText.text)
             }
             
             return finalResult
             
         } catch (e: Exception) {
-            logger.warn(e) { "Error converting formatted text, using plain text" }
-            return formattedText.text
-        }
-    }
-    
-    /**
-     * COMPREHENSIVE escaping - handle all special MarkdownV2 characters
-     */
-    private fun safeEscape(text: String): String {
-        return text
-            .replace("\\", "\\\\")  // Escape backslashes first
-            .replace("*", "\\*")    // Bold markers
-            .replace("_", "\\_")    // Italic markers  
-            .replace("~", "\\~")    // Strikethrough markers
-            .replace("|", "\\|")    // Spoiler markers
-            .replace(">", "\\>")    // Quote markers
-            .replace("[", "\\[")    // Link brackets
-            .replace("]", "\\]")
-            .replace("(", "\\(")    // Link parentheses
-            .replace(")", "\\)")
-            .replace("`", "\\`")    // Code markers
-            .replace("#", "\\#")    // Header markers (just in case)
-            .replace("+", "\\+")    // Plus signs
-            .replace("-", "\\-")    // Minus signs
-            .replace("=", "\\=")    // Equal signs
-            .replace(".", "\\.")    // Dots
-            .replace("!", "\\!")    // Exclamation marks
-    }
-    
-    /**
-     * COMPREHENSIVE escaping for text inside formatting (more selective)
-     */
-    private fun safeEscapeForFormatting(text: String): String {
-        return text
-            .replace("\\", "\\\\")  // Always escape backslashes
-            .replace("[", "\\[")    // Link brackets
-            .replace("]", "\\]")
-            .replace("(", "\\(")    // Link parentheses  
-            .replace(")", "\\)")
-            .replace("`", "\\`")    // Code markers (can break formatting)
-            // Don't escape the current formatting character inside itself
-            // MarkdownV2 handles this automatically for most cases
-    }
-    
-    /**
-     * Check if a URL looks safe to include in markdown
-     */
-    private fun isSafeUrl(url: String): Boolean {
-        return try {
-            url.startsWith("http://") || 
-            url.startsWith("https://") ||
-            url.startsWith("tg://")
-        } catch (e: Exception) {
-            false
-        }
-    }
-    
-    /**
-     * Final safety check - does the generated markdown look risky?
-     * Updated for comprehensive formatting support
-     */
-    private fun looksRisky(markdown: String): Boolean {
-        return try {
-            // Check for unbalanced brackets/parens
-            val openBrackets = markdown.count { it == '[' }
-            val closeBrackets = markdown.count { it == ']' }
-            val openParens = markdown.count { it == '(' }
-            val closeParens = markdown.count { it == ')' }
-            
-            // Check for unbalanced formatting markers
-            val spoilerMarkers = markdown.count { it == '|' }
-            val tildeCount = markdown.count { it == '~' }
-            val asteriskCount = markdown.count { it == '*' }
-            val underscoreCount = markdown.count { it == '_' }
-            
-            // Check for excessive escaping
-            val backslashes = markdown.count { it == '\\' }
-            val totalChars = markdown.length
-            
-            // Enhanced heuristics for "risky" content
-            openBrackets != closeBrackets ||
-            openParens != closeParens ||
-            spoilerMarkers % 2 != 0 ||     // Spoilers must be paired
-            tildeCount % 2 != 0 ||         // Strikethrough must be paired
-            backslashes > totalChars / 8 ||  // More than 12.5% backslashes (was 10%)
-            markdown.contains("\\\\\\") ||    // Triple backslashes
-            markdown.length > 4000 ||         // Too long
-            markdown.contains("|||") ||       // Triple pipes (broken spoilers)
-            markdown.contains("~~~") ||       // Triple tildes (broken strikethrough)
-            markdown.contains("```\n```")     // Empty code blocks
-            
-        } catch (e: Exception) {
-            true // If we can't check, assume it's risky
+            logger.warn(e) { "Error converting formatted text, using escaped plain text" }
+            return TelegramMarkdownConverter.escapeMarkdownV2(formattedText.text)
         }
     }
     

@@ -7,6 +7,7 @@ import com.jobbot.infrastructure.security.RateLimiter
 import com.jobbot.shared.getLogger
 import com.jobbot.shared.localization.Localization
 import com.jobbot.shared.utils.TextUtils
+import com.jobbot.shared.utils.TelegramMarkdownConverter
 import kotlinx.coroutines.*
 import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage
@@ -15,9 +16,14 @@ import org.telegram.telegrambots.meta.exceptions.TelegramApiException
 import java.util.concurrent.LinkedBlockingQueue
 
 /**
- * PRODUCTION-READY NotificationProcessor
+ * ENHANCED NotificationProcessor with Integrated Markdown Converter
  * 
- * Strategy: Always try formatting first, instant fallback to plain text if ANY issue
+ * Strategy: Multi-layered approach for maximum formatting success
+ * 1. Try formatted MarkdownV2 (from TDLib entities)
+ * 2. Try enhanced converter on formatted text
+ * 3. Try enhanced converter on plain text
+ * 4. Fallback to plain text (guaranteed delivery)
+ * 
  * Guarantees: 100% delivery success, maximum formatting preservation
  */
 class NotificationProcessor(
@@ -30,9 +36,13 @@ class NotificationProcessor(
     private val notificationQueue = LinkedBlockingQueue<NotificationMessage>(1000)
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     
-    // Track formatting success rates for monitoring
-    private var formattingSuccessCount = 0
-    private var formattingFailureCount = 0
+    // Enhanced tracking for multi-layered approach
+    private var formattingLayerSuccess = mutableMapOf<String, Int>(
+        "raw_markdown" to 0,
+        "enhanced_formatted" to 0,
+        "enhanced_plain" to 0,
+        "plain_fallback" to 0
+    )
     private var totalNotifications = 0
     
     init {
@@ -56,7 +66,7 @@ class NotificationProcessor(
     
     private fun startNotificationProcessor() {
         scope.launch {
-            logger.info { "Notification processor started with formatting + bulletproof fallbacks" }
+            logger.info { "Notification processor started with ENHANCED multi-layered formatting" }
             
             while (isActive) {
                 try {
@@ -99,11 +109,10 @@ class NotificationProcessor(
             // Build complete message content
             val messageContent = buildMessageContent(notification, language)
             
-            // 🎯 STRATEGY: Try formatting first, instant fallback on ANY issue
-            val success = sendWithInstantFallback(
+            // 🎯 ENHANCED STRATEGY: Multi-layered approach for maximum success
+            val success = sendWithMultiLayeredApproach(
                 chatId = notification.userId.toString(),
-                formattedContent = messageContent.formatted,
-                plainContent = messageContent.plain
+                messageContent = messageContent
             )
             
             if (success) {
@@ -131,21 +140,17 @@ class NotificationProcessor(
     }
     
     /**
-     * Build both formatted and plain versions of the message
+     * Build enhanced message content with multiple formatting versions
      */
-    private fun buildMessageContent(notification: NotificationMessage, language: String): MessageContent {
+    private fun buildMessageContent(notification: NotificationMessage, language: String): EnhancedMessageContent {
         val senderText = buildSenderText(notification)
         
-        // Get the best available text content
-        val jobText: String = if (!notification.formattedMessageText.isNullOrBlank()) {
-            notification.formattedMessageText
-        } else {
-            TextUtils.truncateText(notification.messageText, 4000)
-        }
+        // Get the job text in different formats
+        val rawFormattedText = notification.formattedMessageText
         val plainJobText = TextUtils.truncateText(notification.messageText, 4000)
         
         // Build headers
-        val formattedHeader = if (!notification.messageLink.isNullOrBlank()) {
+        val headerWithLink = if (!notification.messageLink.isNullOrBlank()) {
             val linkText = notification.channelName
             val prettyLink = "[$linkText](${notification.messageLink})"
             Localization.getMessage(language, "notification.job.match.header.with.link", prettyLink)
@@ -159,79 +164,156 @@ class NotificationProcessor(
             "📢 New Match from ${notification.channelName}"
         }
         
-        // Combine all parts
-        val formattedMessage = if (senderText.isNotBlank()) {
-            "$formattedHeader\n$senderText\n\n$jobText"
-        } else {
-            "$formattedHeader\n\n$jobText"
+        // Create different formatting approaches
+        val approaches = mutableMapOf<String, String>()
+        
+        // 1. Raw formatted text (if available)
+        if (!rawFormattedText.isNullOrBlank() && rawFormattedText != plainJobText) {
+            val rawMessage = if (senderText.isNotBlank()) {
+                "$headerWithLink\n$senderText\n\n$rawFormattedText"
+            } else {
+                "$headerWithLink\n\n$rawFormattedText"
+            }
+            approaches["raw_markdown"] = rawMessage
         }
         
+        // 2. Enhanced converter on formatted text
+        if (!rawFormattedText.isNullOrBlank()) {
+            try {
+                val enhancedFormatted = TelegramMarkdownConverter.createFormattedMessage(
+                    header = headerWithLink,
+                    content = rawFormattedText,
+                    footer = senderText.takeIf { it.isNotBlank() },
+                    headerFormat = TelegramMarkdownConverter.MessageFormat.NONE,
+                    escapeContent = false // Already formatted
+                )
+                approaches["enhanced_formatted"] = enhancedFormatted
+            } catch (e: Exception) {
+                logger.debug { "Failed to create enhanced formatted message: ${e.message}" }
+            }
+        }
+        
+        // 3. Enhanced converter on plain text
+        try {
+            val enhancedPlain = TelegramMarkdownConverter.createFormattedMessage(
+                header = notification.channelName,
+                content = plainJobText,
+                footer = if (!notification.messageLink.isNullOrBlank()) "🔗 ${notification.messageLink}" else null,
+                headerFormat = TelegramMarkdownConverter.MessageFormat.BOLD,
+                escapeContent = true
+            )
+            approaches["enhanced_plain"] = enhancedPlain
+        } catch (e: Exception) {
+            logger.debug { "Failed to create enhanced plain message: ${e.message}" }
+        }
+        
+        // 4. Plain text fallback (guaranteed to work)
         val plainMessage = if (senderText.isNotBlank()) {
             "$plainHeader\n$senderText\n\n$plainJobText"
         } else {
             "$plainHeader\n\n$plainJobText"
         }
+        approaches["plain_fallback"] = plainMessage
         
-        return MessageContent(formattedMessage, plainMessage)
+        return EnhancedMessageContent(approaches)
     }
     
     /**
-     * 🎯 CORE STRATEGY: Try formatting with instant fallback
-     * 
-     * This is the key method - it attempts MarkdownV2 but falls back immediately
-     * on ANY sign of trouble, ensuring 100% delivery success
+     * 🎯 ENHANCED STRATEGY: Multi-layered approach for maximum formatting success
+     * Try different formatting approaches in order of sophistication
      */
-    private suspend fun sendWithInstantFallback(chatId: String, formattedContent: String, plainContent: String): Boolean {
-        // First attempt: MarkdownV2 with aggressive timeout
-        val formattingWorked = try {
-            logger.debug { "Attempting MarkdownV2 for user $chatId" }
+    private suspend fun sendWithMultiLayeredApproach(
+        chatId: String, 
+        messageContent: EnhancedMessageContent
+    ): Boolean {
+        
+        val approaches = listOf(
+            "raw_markdown",
+            "enhanced_formatted", 
+            "enhanced_plain",
+            "plain_fallback"
+        )
+        
+        for (approach in approaches) {
+            val content = messageContent.approaches[approach]
+            if (content == null) {
+                logger.debug { "Approach $approach not available for user $chatId" }
+                continue
+            }
+            
+            val success = when (approach) {
+                "plain_fallback" -> {
+                    // Plain text - guaranteed to work
+                    sendPlainTextGuaranteed(chatId, content)
+                }
+                else -> {
+                    // Try MarkdownV2 with this approach
+                    tryMarkdownV2(chatId, content, approach)
+                }
+            }
+            
+            if (success) {
+                formattingLayerSuccess[approach] = formattingLayerSuccess[approach]!! + 1
+                logger.debug { "✅ Successfully sent notification using approach: $approach" }
+                return true
+            }
+            
+            logger.debug { "❌ Approach $approach failed for user $chatId, trying next..." }
+        }
+        
+        // This should never happen since plain_fallback is guaranteed
+        logger.error { "🚨 CRITICAL: All approaches failed for user $chatId" }
+        return false
+    }
+    
+    /**
+     * Try sending with MarkdownV2 using specified approach
+     */
+    private suspend fun tryMarkdownV2(chatId: String, content: String, approach: String): Boolean {
+        return try {
+            logger.debug { "Trying MarkdownV2 with approach: $approach for user $chatId" }
+            
+            // Pre-validate the content
+            if (TelegramMarkdownConverter.hasUnbalancedMarkup(content)) {
+                logger.debug { "Content has unbalanced markup, skipping approach: $approach" }
+                return false
+            }
             
             val markdownMessage = SendMessage.builder()
                 .chatId(chatId)
-                .text(formattedContent)
+                .text(content)
                 .parseMode("MarkdownV2")
                 .linkPreviewOptions(LinkPreviewOptions.builder().isDisabled(true).build())
                 .build()
             
-            // Very aggressive timeout - if it takes more than 2 seconds, something's wrong
-            withTimeout(2000) {
+            // Aggressive timeout for quick fallback
+            withTimeout(3000) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(markdownMessage)
                 }
             }
             
-            logger.debug { "✅ MarkdownV2 success for user $chatId" }
-            formattingSuccessCount++
+            logger.debug { "✅ MarkdownV2 success with approach: $approach for user $chatId" }
             true
             
         } catch (e: TimeoutCancellationException) {
-            logger.debug { "⏰ MarkdownV2 timeout for user $chatId - instant fallback" }
-            formattingFailureCount++
+            logger.debug { "⏰ MarkdownV2 timeout with approach: $approach for user $chatId" }
             false
             
         } catch (e: TelegramApiException) {
-            // Check if it's a parsing error
             if (isFormattingError(e)) {
-                logger.debug { "🔧 MarkdownV2 parsing error for user $chatId: ${e.message?.take(50)} - instant fallback" }
-                formattingFailureCount++
+                val errorType = classifyFormattingError(e)
+                logger.debug { "🔧 MarkdownV2 $errorType with approach: $approach for user $chatId" }
                 false
             } else {
-                // Re-throw non-formatting errors (network, user issues, etc.)
+                // Re-throw non-formatting errors
                 throw e
             }
             
         } catch (e: Exception) {
-            logger.debug { "❌ MarkdownV2 unexpected error for user $chatId: ${e.javaClass.simpleName} - instant fallback" }
-            formattingFailureCount++
+            logger.debug { "❌ MarkdownV2 unexpected error with approach: $approach for user $chatId: ${e.javaClass.simpleName}" }
             false
         }
-        
-        // If formatting failed, send plain text immediately
-        if (!formattingWorked) {
-            return sendPlainTextGuaranteed(chatId, plainContent)
-        }
-        
-        return true
     }
     
     /**
@@ -239,7 +321,7 @@ class NotificationProcessor(
      */
     private suspend fun sendPlainTextGuaranteed(chatId: String, plainContent: String): Boolean {
         return try {
-            logger.debug { "📝 Sending plain text fallback for user $chatId" }
+            logger.debug { "📝 Sending plain text for user $chatId" }
             
             val plainMessage = SendMessage.builder()
                 .chatId(chatId)
@@ -271,7 +353,27 @@ class NotificationProcessor(
                message.contains("escaped") ||
                message.contains("entities") ||
                message.contains("markdown") ||
-               message.contains("parse mode")
+               message.contains("parse mode") ||
+               message.contains("invalid") ||
+               message.contains("unexpected") ||
+               message.contains("character") ||
+               message.contains("offset")
+    }
+    
+    /**
+     * Classify the type of formatting error for better debugging
+     */
+    private fun classifyFormattingError(e: TelegramApiException): String {
+        val message = e.message?.lowercase() ?: ""
+        return when {
+            message.contains("can't parse") -> "parse error"
+            message.contains("reserved") -> "reserved character"
+            message.contains("escaped") -> "escape error"
+            message.contains("entities") -> "entity error"
+            message.contains("offset") -> "offset error"
+            message.contains("character") -> "character error"
+            else -> "formatting error"
+        }
     }
     
     /**
@@ -298,7 +400,7 @@ class NotificationProcessor(
     }
     
     /**
-     * Log formatting success rates periodically for monitoring
+     * Enhanced statistics logging with multi-layer breakdown
      */
     private fun startPeriodicStatsLogging() {
         scope.launch {
@@ -306,11 +408,26 @@ class NotificationProcessor(
                 delay(300000) // Every 5 minutes
                 
                 if (totalNotifications > 0) {
-                    val successRate = (formattingSuccessCount.toDouble() / totalNotifications * 100).toInt()
+                    val totalFormatted = formattingLayerSuccess.values.sum() - formattingLayerSuccess["plain_fallback"]!!
+                    val overallSuccessRate = (totalFormatted.toDouble() / totalNotifications * 100).toInt()
+                    
                     logger.info { 
-                        "📊 Formatting stats: $successRate% success rate " +
-                        "($formattingSuccessCount/$totalNotifications) - " +
-                        "${formattingFailureCount} fallbacks to plain text"
+                        "📊 ENHANCED Formatting stats: $overallSuccessRate% formatted delivery rate " +
+                        "($totalFormatted/$totalNotifications) with multi-layered approach"
+                    }
+                    
+                    // Detailed breakdown
+                    formattingLayerSuccess.forEach { (layer, count) ->
+                        val rate = (count.toDouble() / totalNotifications * 100).toInt()
+                        logger.info { "  └─ $layer: $count notifications ($rate%)" }
+                    }
+                    
+                    // Alert if overall success rate is low
+                    if (overallSuccessRate < 60 && totalNotifications > 10) {
+                        logger.warn { 
+                            "📉 Overall formatting success rate is low ($overallSuccessRate%). " +
+                            "Most notifications are falling back to plain text."
+                        }
                     }
                 }
             }
@@ -319,22 +436,32 @@ class NotificationProcessor(
     
     fun getQueueSize(): Int = notificationQueue.size
     
-    fun getFormattingStats(): Map<String, Int> = mapOf(
-        "total" to totalNotifications,
-        "formattingSuccess" to formattingSuccessCount,
-        "formattingFailures" to formattingFailureCount,
-        "successRate" to if (totalNotifications > 0) (formattingSuccessCount * 100 / totalNotifications) else 0
-    )
+    fun getFormattingStats(): Map<String, Any> {
+        val totalFormatted = formattingLayerSuccess.values.sum() - formattingLayerSuccess["plain_fallback"]!!
+        return mapOf(
+            "total" to totalNotifications,
+            "formattedDeliveries" to totalFormatted,
+            "plainFallbacks" to formattingLayerSuccess["plain_fallback"]!!,
+            "overallSuccessRate" to if (totalNotifications > 0) (totalFormatted * 100 / totalNotifications) else 0,
+            "layerBreakdown" to formattingLayerSuccess.toMap()
+        )
+    }
     
     fun shutdown() {
         logger.info { "Shutting down notification processor..." }
         
-        // Log final stats
+        // Log final enhanced stats
         if (totalNotifications > 0) {
-            val successRate = (formattingSuccessCount.toDouble() / totalNotifications * 100).toInt()
+            val totalFormatted = formattingLayerSuccess.values.sum() - formattingLayerSuccess["plain_fallback"]!!
+            val successRate = (totalFormatted.toDouble() / totalNotifications * 100).toInt()
             logger.info { 
-                "📊 Final formatting stats: $successRate% success rate " +
-                "($formattingSuccessCount/$totalNotifications total notifications)"
+                "📊 Final ENHANCED stats: $successRate% formatted delivery rate " +
+                "($totalFormatted/$totalNotifications total notifications)"
+            }
+            
+            formattingLayerSuccess.forEach { (layer, count) ->
+                val rate = (count.toDouble() / totalNotifications * 100).toInt()
+                logger.info { "  └─ Final $layer: $count notifications ($rate%)" }
             }
         }
         
@@ -342,10 +469,9 @@ class NotificationProcessor(
     }
     
     /**
-     * Data class to hold both formatted and plain versions
+     * Enhanced message content with multiple formatting approaches
      */
-    private data class MessageContent(
-        val formatted: String,
-        val plain: String
+    private data class EnhancedMessageContent(
+        val approaches: Map<String, String>
     )
 }
