@@ -29,7 +29,11 @@ class MessageProcessor(private val database: Database) {
                 
                 if (matchResult.isMatch && !matchResult.blockedByIgnore) {
                     // UPDATED: Use formatted text for notifications when available
-                    val displayText = message.formattedText?.takeIf { it.isNotBlank() } ?: message.text
+                    val displayText: String = if (!message.formattedText.isNullOrBlank()) {
+                        message.formattedText
+                    } else {
+                        message.text
+                    }
                     
                     notifications.add(
                         NotificationMessage(
@@ -412,3 +416,4 @@ class MessageProcessor(private val database: Database) {
             else -> optional.add(keyword)
         }
     }
+}

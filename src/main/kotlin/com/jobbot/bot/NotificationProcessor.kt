@@ -137,8 +137,11 @@ class NotificationProcessor(
         val senderText = buildSenderText(notification)
         
         // Get the best available text content
-        val jobText = notification.formattedMessageText?.takeIf { it.isNotBlank() } 
-            ?: TextUtils.truncateText(notification.messageText, 4000)
+        val jobText: String = if (!notification.formattedMessageText.isNullOrBlank()) {
+            notification.formattedMessageText
+        } else {
+            TextUtils.truncateText(notification.messageText, 4000)
+        }
         val plainJobText = TextUtils.truncateText(notification.messageText, 4000)
         
         // Build headers
