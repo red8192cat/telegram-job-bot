@@ -92,40 +92,25 @@ class NotificationProcessor(
             // Build sender information
             val senderText = buildSenderText(notification)
             
-            // Create the main message text with repositioned sender info
+            // Create the main message text with link in header
             val jobText = TextUtils.truncateText(notification.messageText, 4000)
             
-            val messageText = if (senderText.isNotBlank()) {
-                // Format: Header + Sender + Job Content + Link
-                val baseMessage = Localization.getMessage(
-                    language,
-                    "notification.job.match.header",
-                    notification.channelName
-                ) + "\n$senderText\n\n$jobText"
-                
-                // Add clickable link if available (using localized text)
-                if (!notification.messageLink.isNullOrBlank()) {
-                    val linkText = Localization.getMessage(language, "notification.link.text", notification.messageLink)
-                    "$baseMessage\n\n$linkText"
-                } else {
-                    baseMessage
-                }
+            // Determine header text with link
+            val headerText = if (!notification.messageLink.isNullOrBlank()) {
+                // Remove https:// for cleaner look
+                val cleanLink = notification.messageLink.removePrefix("https://")
+                Localization.getMessage(language, "notification.job.match.header.with.link", cleanLink)
             } else {
-                // Format: Header + Job Content + Link (no sender)
-                val baseMessage = Localization.getMessage(
-                    language,
-                    "notification.job.match",
-                    notification.channelName,
-                    jobText
-                )
-                
-                // Add clickable link if available (using localized text)
-                if (!notification.messageLink.isNullOrBlank()) {
-                    val linkText = Localization.getMessage(language, "notification.link.text", notification.messageLink)
-                    "$baseMessage\n\n$linkText"
-                } else {
-                    baseMessage
-                }
+                // Fallback to channel name if no link
+                Localization.getMessage(language, "notification.job.match.header", notification.channelName)
+            }
+            
+            val messageText = if (senderText.isNotBlank()) {
+                // Format: Header with Link + Sender + Job Content
+                "$headerText\n$senderText\n\n$jobText"
+            } else {
+                // Format: Header with Link + Job Content (no sender)
+                "$headerText\n\n$jobText"
             }
             
             val sendMessage = SendMessage.builder()
