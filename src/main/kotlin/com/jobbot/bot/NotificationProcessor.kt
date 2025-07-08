@@ -16,7 +16,7 @@ import java.util.concurrent.LinkedBlockingQueue
 
 /**
  * Handles notification processing and delivery
- * Extracted from TelegramBot.kt to separate concerns
+ * With safe markdown support and pretty @tag links
  */
 class NotificationProcessor(
     private val database: Database,
@@ -92,41 +92,40 @@ class NotificationProcessor(
             // Build sender information
             val senderText = buildSenderText(notification)
             
-            // Create the main message text with link in header
+            // Create the main message text with pretty link in header
             val jobText = TextUtils.truncateText(notification.messageText, 4000)
             
-            // Determine header text with link
+            // Determine header text with pretty clickable @tag link
             val headerText = if (!notification.messageLink.isNullOrBlank()) {
-                // Remove https:// for cleaner look
-                val cleanLink = notification.messageLink.removePrefix("https://")
-                Localization.getMessage(language, "notification.job.match.header.with.link", cleanLink)
+                // Create pretty clickable @tag link in header
+                val linkText = notification.channelName // This will be the @tag or channel name
+                val prettyLink = "[$linkText](${notification.messageLink})"
+                Localization.getMessage(language, "notification.job.match.header.with.link", prettyLink)
             } else {
                 // Fallback to channel name if no link
                 Localization.getMessage(language, "notification.job.match.header", notification.channelName)
             }
             
             val messageText = if (senderText.isNotBlank()) {
-                // Format: Header with Link + Sender + Job Content
+                // Format: Header with Pretty Link + Sender + Job Content
                 "$headerText\n$senderText\n\n$jobText"
             } else {
-                // Format: Header with Link + Job Content (no sender)
+                // Format: Header with Pretty Link + Job Content (no sender)
                 "$headerText\n\n$jobText"
             }
             
-            val sendMessage = SendMessage.builder()
-                .chatId(notification.userId.toString())
-                .text(messageText)
-                // Disable link preview for cleaner notifications
-                .linkPreviewOptions(LinkPreviewOptions.builder()
-                    .isDisabled(true)
-                    .build())
-                .build()
-
-            withContext(Dispatchers.IO) {
-                telegramClient.execute(sendMessage)
+            // Try sending with markdown first, fallback to plain text if it fails
+            val success = sendWithMarkdownFallback(
+                chatId = notification.userId.toString(),
+                text = messageText,
+                fallbackText = createFallbackText(language, notification, senderText, jobText)
+            )
+            
+            if (success) {
+                logger.debug { "Notification sent to user ${notification.userId}" }
+            } else {
+                logger.warn { "Failed to send notification to user ${notification.userId} with both markdown and plain text" }
             }
-
-            logger.debug { "Notification sent to user ${notification.userId}" }
 
         } catch (e: TelegramApiException) {
             logger.error(e) { "Failed to send notification to user ${notification.userId}" }
@@ -145,6 +144,111 @@ class NotificationProcessor(
         } catch (e: Exception) {
             logger.error(e) { "Unexpected error sending notification to user ${notification.userId}" }
             ErrorTracker.logError("ERROR", "Unexpected notification error: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * Create fallback text for when markdown fails
+     */
+    private fun createFallbackText(language: String, notification: NotificationMessage, senderText: String, jobText: String): String {
+        // For fallback, use the simple @tag format (no markdown)
+        val headerText = if (!notification.messageLink.isNullOrBlank()) {
+            val cleanLink = notification.messageLink.removePrefix("https://")
+            Localization.getMessage(language, "notification.job.match.header.with.link", cleanLink)
+        } else {
+            Localization.getMessage(language, "notification.job.match.header", notification.channelName)
+        }
+        
+        return if (senderText.isNotBlank()) {
+            "$headerText\n$senderText\n\n$jobText"
+        } else {
+            "$headerText\n\n$jobText"
+        }
+    }
+    
+    /**
+     * Try sending with markdown first, fallback to plain text if markdown fails
+     */
+    private suspend fun sendWithMarkdownFallback(chatId: String, text: String, fallbackText: String): Boolean {
+        return try {
+            // First attempt: Try with MarkdownV2 (most robust)
+            val markdownMessage = SendMessage.builder()
+                .chatId(chatId)
+                .text(text)
+                .parseMode("MarkdownV2")
+                .linkPreviewOptions(LinkPreviewOptions.builder()
+                    .isDisabled(true)
+                    .build())
+                .build()
+            
+            withContext(Dispatchers.IO) {
+                telegramClient.execute(markdownMessage)
+            }
+            
+            logger.debug { "Sent notification with MarkdownV2 to $chatId" }
+            true
+            
+        } catch (e: TelegramApiException) {
+            if (e.message?.contains("can't parse entities") == true || 
+                e.message?.contains("parse mode") == true) {
+                
+                logger.debug { "MarkdownV2 failed for $chatId, trying Markdown..." }
+                
+                try {
+                    // Second attempt: Try with classic Markdown
+                    val markdownMessage = SendMessage.builder()
+                        .chatId(chatId)
+                        .text(text)
+                        .parseMode("Markdown")
+                        .linkPreviewOptions(LinkPreviewOptions.builder()
+                            .isDisabled(true)
+                            .build())
+                        .build()
+                    
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(markdownMessage)
+                    }
+                    
+                    logger.debug { "Sent notification with Markdown to $chatId" }
+                    true
+                    
+                } catch (e2: TelegramApiException) {
+                    if (e2.message?.contains("can't parse entities") == true || 
+                        e2.message?.contains("parse mode") == true) {
+                        
+                        logger.debug { "Markdown also failed for $chatId, using plain text fallback..." }
+                        
+                        try {
+                            // Final fallback: Use pre-prepared fallback text
+                            val plainMessage = SendMessage.builder()
+                                .chatId(chatId)
+                                .text(fallbackText)
+                                // No parseMode = plain text
+                                .linkPreviewOptions(LinkPreviewOptions.builder()
+                                    .isDisabled(true)
+                                    .build())
+                                .build()
+                            
+                            withContext(Dispatchers.IO) {
+                                telegramClient.execute(plainMessage)
+                            }
+                            
+                            logger.debug { "Sent notification with plain text fallback to $chatId" }
+                            true
+                            
+                        } catch (e3: TelegramApiException) {
+                            logger.error(e3) { "Even plain text fallback failed for $chatId" }
+                            false
+                        }
+                    } else {
+                        // Different error, not parsing related
+                        throw e2
+                    }
+                }
+            } else {
+                // Different error, not parsing related
+                throw e
+            }
         }
     }
     
