@@ -13,6 +13,7 @@ import java.util.regex.Pattern
 class MessageProcessor(private val database: Database) {
     private val logger = getLogger("MessageProcessor")
     
+    // UPDATED: Now handles both plain text (for matching) and formatted text (for notifications)
     suspend fun processChannelMessage(message: ChannelMessage): List<NotificationMessage> = withContext(Dispatchers.IO) {
         val notifications = mutableListOf<NotificationMessage>()
         
@@ -23,16 +24,21 @@ class MessageProcessor(private val database: Database) {
             for (user in users) {
                 if (user.keywords.isNullOrBlank()) continue
                 
+                // Use plain text for keyword matching (more reliable)
                 val matchResult = matchesUserKeywords(message.text, user.keywords!!, user.ignoreKeywords)
                 
                 if (matchResult.isMatch && !matchResult.blockedByIgnore) {
+                    // UPDATED: Use formatted text for notifications when available
+                    val displayText = message.formattedText?.takeIf { it.isNotBlank() } ?: message.text
+                    
                     notifications.add(
                         NotificationMessage(
                             userId = user.telegramId,
                             channelName = message.channelName ?: message.channelId,
-                            messageText = message.text,
+                            messageText = message.text, // Plain text for fallback
+                            formattedMessageText = displayText, // Formatted text for display
                             senderUsername = message.senderUsername,
-                            messageLink = message.messageLink  // NEW: Pass through the message link
+                            messageLink = message.messageLink
                         )
                     )
                     
@@ -406,4 +412,3 @@ class MessageProcessor(private val database: Database) {
             else -> optional.add(keyword)
         }
     }
-}

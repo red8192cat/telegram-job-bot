@@ -209,10 +209,11 @@ class ChannelMonitor(
                     
                     is TdApi.TextEntityTypeTextUrl -> {
                         // Only include URLs if they look safe
-                        if (isSafeUrl(entity.type.url)) {
-                            result.append("[${safeEscapeForFormatting(entityText)}](${entity.type.url})")
+                        val textUrl = entity.type as TdApi.TextEntityTypeTextUrl
+                        if (isSafeUrl(textUrl.url)) {
+                            result.append("[${safeEscapeForFormatting(entityText)}](${textUrl.url})")
                         } else {
-                            result.append("${safeEscape(entityText)} (${entity.type.url})")
+                            result.append("${safeEscape(entityText)} (${textUrl.url})")
                         }
                     }
                     
