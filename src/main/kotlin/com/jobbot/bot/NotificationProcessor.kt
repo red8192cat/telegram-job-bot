@@ -16,7 +16,7 @@ import org.telegram.telegrambots.meta.exceptions.TelegramApiException
 import java.util.concurrent.LinkedBlockingQueue
 
 /**
- * ENHANCED NotificationProcessor with Integrated Markdown Converter
+ * FIXED NotificationProcessor with null-safe message building
  * 
  * Strategy: Multi-layered approach for maximum formatting success
  * 1. Try formatted MarkdownV2 (from TDLib entities)
@@ -24,7 +24,7 @@ import java.util.concurrent.LinkedBlockingQueue
  * 3. Try enhanced converter on plain text
  * 4. Fallback to plain text (guaranteed delivery)
  * 
- * Guarantees: 100% delivery success, maximum formatting preservation
+ * FIXED: Handles null senderUsername properly without breaking MarkdownV2
  */
 class NotificationProcessor(
     private val database: Database,
@@ -140,28 +140,29 @@ class NotificationProcessor(
     }
     
     /**
-     * Build enhanced message content with multiple formatting versions
+     * 🔧 FIXED: Build enhanced message content with null-safe sender handling
      */
     private fun buildMessageContent(notification: NotificationMessage, language: String): EnhancedMessageContent {
+        // 🔧 FIXED: Null-safe sender text building
         val senderText = buildSenderText(notification, language)
         
         // Get the job text in different formats
         val rawFormattedText = notification.formattedMessageText
         val plainJobText = TextUtils.truncateText(notification.messageText, 4000)
         
-        // Build headers
+        // 🔧 FIXED: Null-safe header building
         val headerWithLink = if (!notification.messageLink.isNullOrBlank()) {
-            val linkText = notification.channelName
+            val linkText = notification.channelName ?: "Channel"
             val prettyLink = "[$linkText](${notification.messageLink})"
             Localization.getMessage(language, "notification.job.match.header.with.link", prettyLink)
         } else {
-            Localization.getMessage(language, "notification.job.match.header", notification.channelName)
+            Localization.getMessage(language, "notification.job.match.header", notification.channelName ?: "Channel")
         }
         
         val plainHeader = if (!notification.messageLink.isNullOrBlank()) {
-            "${Localization.getMessage(language, "notification.job.match.header", notification.channelName)}\n🔗 ${notification.messageLink}"
+            "${Localization.getMessage(language, "notification.job.match.header", notification.channelName ?: "Channel")}\n🔗 ${notification.messageLink}"
         } else {
-            Localization.getMessage(language, "notification.job.match.header", notification.channelName)
+            Localization.getMessage(language, "notification.job.match.header", notification.channelName ?: "Channel")
         }
         
         // Create different formatting approaches
@@ -175,6 +176,7 @@ class NotificationProcessor(
                 "$headerWithLink\n\n$rawFormattedText"
             }
             approaches["raw_markdown"] = rawMessage
+            logger.debug { "Raw markdown approach built: ${rawMessage.length} chars" }
         }
         
         // 2. Enhanced converter on formatted text
@@ -188,6 +190,7 @@ class NotificationProcessor(
                     escapeContent = false // Already formatted
                 )
                 approaches["enhanced_formatted"] = enhancedFormatted
+                logger.debug { "Enhanced formatted approach built: ${enhancedFormatted.length} chars" }
             } catch (e: Exception) {
                 logger.debug { "Failed to create enhanced formatted message: ${e.message}" }
             }
@@ -196,13 +199,14 @@ class NotificationProcessor(
         // 3. Enhanced converter on plain text
         try {
             val enhancedPlain = TelegramMarkdownConverter.createFormattedMessage(
-                header = notification.channelName,
+                header = notification.channelName ?: "Channel",
                 content = plainJobText,
                 footer = if (!notification.messageLink.isNullOrBlank()) "🔗 ${notification.messageLink}" else null,
                 headerFormat = TelegramMarkdownConverter.MessageFormat.BOLD,
                 escapeContent = true
             )
             approaches["enhanced_plain"] = enhancedPlain
+            logger.debug { "Enhanced plain approach built: ${enhancedPlain.length} chars" }
         } catch (e: Exception) {
             logger.debug { "Failed to create enhanced plain message: ${e.message}" }
         }
@@ -214,6 +218,7 @@ class NotificationProcessor(
             "$plainHeader\n\n$plainJobText"
         }
         approaches["plain_fallback"] = plainMessage
+        logger.debug { "Plain fallback approach built: ${plainMessage.length} chars" }
         
         return EnhancedMessageContent(approaches)
     }
@@ -273,9 +278,10 @@ class NotificationProcessor(
         return try {
             logger.debug { "Trying MarkdownV2 with approach: $approach for user $chatId" }
             
-            // Pre-validate the content
+            // 🔧 FIXED: Enhanced pre-validation with detailed logging
             if (TelegramMarkdownConverter.hasUnbalancedMarkup(content)) {
                 logger.debug { "Content has unbalanced markup, skipping approach: $approach" }
+                logger.debug { "Problematic content (first 200 chars): ${content.take(200)}" }
                 return false
             }
             
@@ -304,6 +310,8 @@ class NotificationProcessor(
             if (isFormattingError(e)) {
                 val errorType = classifyFormattingError(e)
                 logger.debug { "🔧 MarkdownV2 $errorType with approach: $approach for user $chatId" }
+                // 🔧 FIXED: Log the actual problematic content for debugging
+                logger.debug { "Problematic content (first 500 chars): ${content.take(500)}" }
                 false
             } else {
                 // Re-throw non-formatting errors
@@ -388,20 +396,31 @@ class NotificationProcessor(
                message.contains("kicked")
     }
     
+    /**
+     * 🔧 FIXED: Null-safe sender text building
+     */
     private fun buildSenderText(notification: NotificationMessage, language: String): String {
         val senderUsername = notification.senderUsername
         val channelName = notification.channelName
         
         return when {
-            senderUsername.isNullOrBlank() -> ""
-            senderUsername.equals(channelName, ignoreCase = true) -> ""
+            senderUsername.isNullOrBlank() -> {
+                logger.debug { "No sender username available, skipping sender text" }
+                ""
+            }
+            senderUsername.equals(channelName, ignoreCase = true) -> {
+                logger.debug { "Sender username same as channel name, skipping sender text" }
+                ""
+            }
             else -> {
                 // Check if localization key exists and is not empty
                 val senderText = Localization.getMessage(language, "notification.sender.posted_by", senderUsername)
                 if (senderText.startsWith("[") && senderText.endsWith("]")) {
                     // Key not found - return empty (disabled)
+                    logger.debug { "Sender notification disabled via localization" }
                     ""
                 } else {
+                    logger.debug { "Built sender text: $senderText" }
                     senderText
                 }
             }
