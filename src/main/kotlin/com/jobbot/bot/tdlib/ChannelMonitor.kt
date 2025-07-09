@@ -15,7 +15,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Handles TDLib message monitoring and processing with ENHANCED MarkdownV2 formatting support
- * Strategy: Extract rich formatting using integrated converter + TDLib entity parsing
+ * FIXED: Addresses channel vs group formatting inconsistency issue
+ * Strategy: Extract rich formatting using integrated converter + TDLib entity parsing with fallback support
  */
 class ChannelMonitor(
     private val database: Database,
@@ -40,14 +41,15 @@ class ChannelMonitor(
         try {
             val message = update.message
             val chatId = message.chatId
+            val isChannelPost = message.isChannelPost
             
-            logger.debug { "Processing message from chat $chatId, isChannelPost: ${message.isChannelPost}" }
+            logger.debug { "Processing message from chat $chatId, isChannelPost: $isChannelPost" }
             
-            val isMonitoredChat = message.isChannelPost || isMonitoredGroupChat(chatId)
+            val isMonitoredChat = isChannelPost || isMonitoredGroupChat(chatId)
             
             if (isMonitoredChat) {
                 val channelId = getChannelIdentifier(chatId)
-                logger.debug { "Message from channelId: $channelId (isChannelPost: ${message.isChannelPost})" }
+                logger.debug { "Message from channelId: $channelId (isChannelPost: $isChannelPost)" }
                 
                 if (channelId == null) {
                     logger.debug { "Could not determine channel identifier for chat $chatId" }
@@ -59,10 +61,10 @@ class ChannelMonitor(
                     return
                 }
                 
-                logger.info { "Processing message from monitored chat: $channelId (type: ${if (message.isChannelPost) "channel" else "group"})" }
+                logger.info { "Processing message from monitored chat: $channelId (type: ${if (isChannelPost) "channel" else "group"})" }
                 
-                // Extract both plain text and formatted text
-                val (plainText, formattedText) = extractMessageContent(message.content)
+                // ENHANCED: Extract both plain text and formatted text with channel post information
+                val (plainText, formattedText) = extractMessageContent(message.content, isChannelPost)
                 
                 if (plainText.isBlank()) {
                     logger.debug { "Message has no text content, skipping" }
@@ -74,6 +76,11 @@ class ChannelMonitor(
                     logger.debug { "Generated formatted text with ${formattedText.length - plainText.length} additional markup characters" }
                 }
                 
+                // ENHANCED: Log formatting success for channel posts
+                if (isChannelPost && formattedText.length > plainText.length) {
+                    logger.info { "Successfully preserved formatting for channel post: ${plainText.length} -> ${formattedText.length} chars" }
+                }
+                
                 scope.launch {
                     try {
                         // Get channel details
@@ -81,7 +88,7 @@ class ChannelMonitor(
                         val displayName = when {
                             !channelDetails?.channelTag.isNullOrBlank() -> channelDetails!!.channelTag!!
                             !channelDetails?.channelName.isNullOrBlank() -> channelDetails!!.channelName!!
-                            else -> if (message.isChannelPost) "Channel" else "Group"
+                            else -> if (isChannelPost) "Channel" else "Group"
                         }
                         
                         val senderUsername = extractSenderUsername(message, client)
@@ -119,7 +126,7 @@ class ChannelMonitor(
                     }
                 }
             } else {
-                logger.debug { "Ignoring message from unmonitored chat $chatId (isChannelPost: ${message.isChannelPost})" }
+                logger.debug { "Ignoring message from unmonitored chat $chatId (isChannelPost: $isChannelPost)" }
             }
         } catch (e: Exception) {
             logger.error(e) { "Error in handleNewMessage" }
@@ -129,31 +136,45 @@ class ChannelMonitor(
     
     /**
      * Extract both plain text and formatted text from message content
+     * ENHANCED: Better handling of channel vs group message formatting
      * Returns Pair<plainText, formattedText>
      */
-    private fun extractMessageContent(content: TdApi.MessageContent): Pair<String, String> {
+    private fun extractMessageContent(content: TdApi.MessageContent, isChannelPost: Boolean = false): Pair<String, String> {
         return when (content) {
             is TdApi.MessageText -> {
                 val plainText = content.text.text
-                val formattedText = convertFormattedTextToMarkdown(content.text)
+                val formattedText = convertFormattedTextToMarkdown(content.text, isChannelPost)
                 logger.debug { "Text message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
+                
+                // ENHANCED: Debug entity information for channel posts
+                if (isChannelPost) {
+                    if (content.text.entities.isNotEmpty()) {
+                        logger.debug { "Channel post entities: ${content.text.entities.size} entities found" }
+                        content.text.entities.forEach { entity ->
+                            logger.debug { "Entity: ${entity.type.javaClass.simpleName} at ${entity.offset}-${entity.offset + entity.length}" }
+                        }
+                    } else {
+                        logger.debug { "Channel post has no entities - checking for fallback formatting" }
+                    }
+                }
+                
                 Pair(plainText, formattedText)
             }
             is TdApi.MessagePhoto -> {
                 val plainText = content.caption?.text ?: ""
-                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it, isChannelPost) } ?: ""
                 logger.debug { "Photo message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
             is TdApi.MessageVideo -> {
                 val plainText = content.caption?.text ?: ""
-                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it, isChannelPost) } ?: ""
                 logger.debug { "Video message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
             is TdApi.MessageDocument -> {
                 val plainText = content.caption?.text ?: ""
-                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it, isChannelPost) } ?: ""
                 logger.debug { "Document message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
@@ -165,11 +186,23 @@ class ChannelMonitor(
     }
     
     /**
-     * ENHANCED: Convert TDLib FormattedText to MarkdownV2 using integrated converter
-     * Strategy: Use TDLib entity information + enhanced converter for better results
+     * ENHANCED: Convert TDLib FormattedText to MarkdownV2 with channel-specific handling
+     * FIXED: Adds fallback formatting detection for channel posts
      */
-    private fun convertFormattedTextToMarkdown(formattedText: TdApi.FormattedText): String {
+    private fun convertFormattedTextToMarkdown(formattedText: TdApi.FormattedText, isChannelPost: Boolean = false): String {
+        // ENHANCED: Check if entities are empty (common issue with channel posts)
         if (formattedText.entities.isEmpty()) {
+            logger.debug { "No entities found - checking for fallback formatting (isChannelPost: $isChannelPost)" }
+            
+            // FIXED: For channel posts, try to detect formatting patterns in the text itself
+            if (isChannelPost) {
+                val fallbackFormatted = detectAndConvertChannelFormatting(formattedText.text)
+                if (fallbackFormatted != formattedText.text) {
+                    logger.debug { "Applied fallback formatting for channel post" }
+                    return fallbackFormatted
+                }
+            }
+            
             // No entities - just escape the plain text safely
             return TelegramMarkdownConverter.escapeMarkdownV2(formattedText.text)
         }
@@ -179,6 +212,11 @@ class ChannelMonitor(
             val entities = formattedText.entities.sortedBy { it.offset }
             val result = StringBuilder()
             var currentPos = 0
+            
+            // ENHANCED: Add entity processing debug for channel posts
+            if (isChannelPost) {
+                logger.debug { "Processing ${entities.size} entities for channel post" }
+            }
             
             for (entity in entities) {
                 // Add text before this entity (properly escaped)
@@ -190,6 +228,11 @@ class ChannelMonitor(
                 
                 // Get the entity text
                 val entityText = text.substring(entity.offset, entity.offset + entity.length)
+                
+                // ENHANCED: Add entity-specific debug logging for channel posts
+                if (isChannelPost) {
+                    logger.debug { "Processing entity: ${entity.type.javaClass.simpleName} - '$entityText'" }
+                }
                 
                 // Handle different entity types with enhanced converter
                 when (entity.type) {
@@ -307,11 +350,57 @@ class ChannelMonitor(
                 return TelegramMarkdownConverter.escapeMarkdownV2(formattedText.text)
             }
             
+            // ENHANCED: Log successful conversion for channel posts
+            if (isChannelPost) {
+                logger.debug { "Successfully converted channel post formatting: ${text.length} -> ${finalResult.length} chars" }
+            }
+            
             return finalResult
             
         } catch (e: Exception) {
-            logger.warn(e) { "Error converting formatted text, using escaped plain text" }
+            logger.warn(e) { "Error converting formatted text (isChannelPost: $isChannelPost), using escaped plain text" }
             return TelegramMarkdownConverter.escapeMarkdownV2(formattedText.text)
+        }
+    }
+    
+    /**
+     * NEW: Fallback formatting detection for channel posts
+     * Detects common formatting patterns when entities are missing
+     */
+    private fun detectAndConvertChannelFormatting(text: String): String {
+        try {
+            // Look for common formatting patterns in the text itself
+            var result = text
+            
+            // Detect lines that look like headers (all caps, short lines)
+            val lines = result.split("\n")
+            val processedLines = lines.map { line ->
+                val trimmed = line.trim()
+                when {
+                    // ALL CAPS lines that are short (likely headers)
+                    trimmed.matches(Regex("^[A-Z\\s]{2,20}$")) && trimmed.length < 20 -> {
+                        "*${TelegramMarkdownConverter.escapeForFormatting(trimmed)}*"
+                    }
+                    // Lines that start with emojis followed by caps (likely sections)
+                    trimmed.matches(Regex("^[\\p{So}\\p{Cn}]+\\s+[A-Z][A-Z\\s]+$")) && trimmed.length < 30 -> {
+                        "*${TelegramMarkdownConverter.escapeForFormatting(trimmed)}*"
+                    }
+                    // Lines that look like bullet points
+                    trimmed.matches(Regex("^[•\\-\\*]\\s+.+$")) -> {
+                        TelegramMarkdownConverter.escapeMarkdownV2(line)
+                    }
+                    else -> TelegramMarkdownConverter.escapeMarkdownV2(line)
+                }
+            }
+            
+            result = processedLines.joinToString("\n")
+            
+            logger.debug { "Applied fallback formatting patterns" }
+            return result
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Error in fallback formatting detection" }
+            return TelegramMarkdownConverter.escapeMarkdownV2(text)
         }
     }
     
