@@ -5,7 +5,7 @@ import java.util.regex.Pattern
 
 /**
  * Enhanced Telegram MarkdownV2 converter for the JobBot project
- * Combines bidirectional conversion with improved TDLib formatting support
+ * ADDED: Proper link text escaping for MarkdownV2 links
  */
 object TelegramMarkdownConverter {
     private val logger = getLogger("TelegramMarkdownConverter")
@@ -23,6 +23,20 @@ object TelegramMarkdownConverter {
     private val MD_CODE_BLOCK_PATTERN = Pattern.compile("""```(\w*)\n?(.*?)```""", Pattern.DOTALL)
     private val MD_LINK_PATTERN = Pattern.compile("""\[([^\]]+)\]\(([^)]+)\)""")
     private val MD_QUOTE_PATTERN = Pattern.compile("""^>\s*(.*)$""", Pattern.MULTILINE)
+    
+    /**
+     * NEW: Escape text specifically for use inside MarkdownV2 link text [text](url)
+     * Only escapes characters that could break the link, NOT [ and ]
+     */
+    fun escapeForLinkText(text: String): String {
+        return text
+            .replace("\\", "\\\\")  // Escape backslashes first (always)
+            .replace("_", "\\_")    // Escape underscores (could start italic)
+            .replace("*", "\\*")    // Escape asterisks (could start bold)
+            .replace("`", "\\`")    // Escape backticks (could start code)
+            .replace("~", "\\~")    // Escape tildes (could start strikethrough)
+            // Note: [ and ] are NOT escaped here because they're part of link syntax
+    }
     
     /**
      * Convert standard Markdown to Telegram MarkdownV2 format
@@ -73,9 +87,9 @@ object TelegramMarkdownConverter {
                 "_${escapeForFormatting(match.group(1))}_"
             }
             
-            // Process links
+            // Process links - FIXED: Use proper link text escaping
             result = MD_LINK_PATTERN.matcher(result).replaceAll { match ->
-                val linkText = escapeForFormatting(match.group(1))
+                val linkText = escapeForLinkText(match.group(1))  // Use new method
                 val url = escapeUrlInLink(match.group(2))
                 "[$linkText]($url)"
             }
@@ -291,4 +305,5 @@ object TelegramMarkdownConverter {
 // Extension functions for easier use
 fun String.toTelegramMarkdown(): String = TelegramMarkdownConverter.markdownToTelegram(this)
 fun String.escapeMarkdownV2(): String = TelegramMarkdownConverter.escapeMarkdownV2(this)
+fun String.escapeForLinkText(): String = TelegramMarkdownConverter.escapeForLinkText(this)
 fun String.isValidTelegramMarkdown(): Boolean = TelegramMarkdownConverter.isValidTelegramMarkdown(this)

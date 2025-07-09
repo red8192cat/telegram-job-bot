@@ -16,7 +16,7 @@ import org.telegram.telegrambots.meta.exceptions.TelegramApiException
 import java.util.concurrent.LinkedBlockingQueue
 
 /**
- * SIMPLIFIED NotificationProcessor - Clean copy of original post
+ * FIXED NotificationProcessor - Proper MarkdownV2 link handling
  * 
  * Format:
  * 1. "New match from [channel]"
@@ -131,7 +131,7 @@ class NotificationProcessor(
     }
     
     /**
-     * Build simple message: header with clickable channel link + original content
+     * FIXED: Build simple message with proper MarkdownV2 link handling
      */
     private fun buildSimpleMessage(notification: NotificationMessage, language: String): Pair<String, String> {
         val channelName = notification.channelName ?: "Channel"
@@ -148,15 +148,27 @@ class NotificationProcessor(
                 "@$channelName" // Add @ for display
             }
             
-            // Create MarkdownV2 link: [@channelname](https://t.me/channelname/123)
-            val escapedLinkText = TelegramMarkdownConverter.escapeForFormatting(linkDisplayText)
-            val escapedUrl = TelegramMarkdownConverter.escapeUrlInLink(notification.messageLink)
-            val markdownLink = "[$escapedLinkText]($escapedUrl)"
+            // FIXED: For MarkdownV2 links, properly escape only the content inside the link text
+            // Do NOT escape [ and ] as they are part of the link syntax [text](url)
+            val safeLinkText = linkDisplayText
+                .replace("\\", "\\\\")  // Escape backslashes first
+                .replace("_", "\\_")    // Escape underscores (could start italic)
+                .replace("*", "\\*")    // Escape asterisks (could start bold)
+                .replace("`", "\\`")    // Escape backticks (could start code)
+                .replace("~", "\\~")    // Escape tildes (could start strikethrough)
+                // Note: [ and ] are NOT escaped here because they're part of link syntax
             
-            // Get the raw localization template and escape it
+            val escapedUrl = TelegramMarkdownConverter.escapeUrlInLink(notification.messageLink)
+            val markdownLink = "[$safeLinkText]($escapedUrl)"
+            
+            // Get the raw localization template and process it properly
             val rawTemplate = Localization.getMessage(language, "notification.job.match.header", "PLACEHOLDER")
             val templateWithPlaceholder = rawTemplate.replace("PLACEHOLDER", "{0}")
+            
+            // Escape the template but preserve the placeholder for replacement
             val escapedTemplate = TelegramMarkdownConverter.escapeMarkdownV2(templateWithPlaceholder)
+            
+            // Replace the escaped placeholder with the actual link
             val finalHeader = escapedTemplate.replace("\\{0\\}", markdownLink).replace("{0}", markdownLink)
             
             markdownParts.add(finalHeader)
