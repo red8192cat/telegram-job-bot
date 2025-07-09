@@ -78,7 +78,7 @@ class ChannelMonitor(
                 
                 // ENHANCED: Log formatting success for channel posts
                 if (isChannelPost && formattedText.length > plainText.length) {
-                    logger.info { "Successfully preserved formatting for channel post: ${plainText.length} -> ${formattedText.length} chars" }
+                    logger.debug { "Channel post formatted: ${plainText.length} -> ${formattedText.length} chars" }
                 }
                 
                 scope.launch {
@@ -321,6 +321,9 @@ class ChannelMonitor(
             }
             
             val finalResult = result.toString()
+            
+            // DEBUG: Log the actual generated MarkdownV2 to identify the issue
+            logger.debug { "Generated MarkdownV2 (${finalResult.length} chars): $finalResult" }
             
             // Use converter's validation
             if (TelegramMarkdownConverter.hasUnbalancedMarkup(finalResult)) {
