@@ -328,6 +328,60 @@ class ChannelMonitor(
         }
     }
     
+    // Safer tag extraction without dangerous reflection
+    private fun extractChannelTag(chat: TdApi.Chat, client: Client?): String? {
+        return try {
+            when (val chatType = chat.type) {
+                is TdApi.ChatTypeSupergroup -> {
+                    // Try to get supergroup info for username
+                    val deferred = CompletableDeferred<String?>()
+                    
+                    client?.send(TdApi.GetSupergroup(chatType.supergroupId)) { result ->
+                        when (result) {
+                            is TdApi.Supergroup -> {
+                                // SAFER: Use try-catch for reflection instead of assuming field exists
+                                val username = try {
+                                    val usernameField = result.javaClass.getDeclaredField("username")
+                                    usernameField.isAccessible = true
+                                    val value = usernameField.get(result) as? String
+                                    if (!value.isNullOrEmpty()) "@$value" else null
+                                } catch (e: NoSuchFieldException) {
+                                    logger.debug { "Username field not available in TDLib version - this is expected" }
+                                    null
+                                } catch (e: SecurityException) {
+                                    logger.debug { "Cannot access username field due to security restrictions" }
+                                    null
+                                } catch (e: Exception) {
+                                    logger.debug { "Could not extract username via reflection: ${e.message}" }
+                                    null
+                                }
+                                deferred.complete(username)
+                            }
+                            is TdApi.Error -> {
+                                logger.debug { "Could not get supergroup info: ${result.message}" }
+                                deferred.complete(null)
+                            }
+                        }
+                    }
+                    
+                    // Wait briefly for the result, but don't block
+                    try {
+                        runBlocking {
+                            withTimeout(2000) { deferred.await() }
+                        }
+                    } catch (e: Exception) {
+                        logger.debug { "Timeout getting supergroup username - continuing without tag" }
+                        null
+                    }
+                }
+                else -> null
+            }
+        } catch (e: Exception) {
+            logger.debug { "Error extracting channel tag: ${e.message}" }
+            null
+        }
+    }
+    
     private fun isMonitoredGroupChat(chatId: Long): Boolean {
         // Check if this chat ID matches any of our monitored channels/groups
         val channelId = getChannelIdentifier(chatId)
