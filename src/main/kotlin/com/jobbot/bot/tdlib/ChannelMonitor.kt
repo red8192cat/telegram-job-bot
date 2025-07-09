@@ -14,9 +14,8 @@ import org.drinkless.tdlib.TdApi
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Handles TDLib message monitoring and processing with ENHANCED MarkdownV2 formatting support
- * FIXED: Addresses channel vs group formatting inconsistency issue
- * Strategy: Extract rich formatting using integrated converter + TDLib entity parsing with fallback support
+ * Handles TDLib message monitoring and processing with CONSISTENT MarkdownV2 formatting support
+ * FIXED: Unified entity processing for both channels and groups
  */
 class ChannelMonitor(
     private val database: Database,
@@ -63,8 +62,8 @@ class ChannelMonitor(
                 
                 logger.info { "Processing message from monitored chat: $channelId (type: ${if (isChannelPost) "channel" else "group"})" }
                 
-                // ENHANCED: Extract both plain text and formatted text with channel post information
-                val (plainText, formattedText) = extractMessageContent(message.content, isChannelPost)
+                // 🔧 FIXED: Use consistent entity processing for both channels and groups
+                val (plainText, formattedText) = extractMessageContent(message.content)
                 
                 if (plainText.isBlank()) {
                     logger.debug { "Message has no text content, skipping" }
@@ -74,11 +73,6 @@ class ChannelMonitor(
                 logger.debug { "Processing plain text: '$plainText'" }
                 if (formattedText != plainText) {
                     logger.debug { "Generated formatted text with ${formattedText.length - plainText.length} additional markup characters" }
-                }
-                
-                // ENHANCED: Log formatting success for channel posts
-                if (isChannelPost && formattedText.length > plainText.length) {
-                    logger.debug { "Channel post formatted: ${plainText.length} -> ${formattedText.length} chars" }
                 }
                 
                 scope.launch {
@@ -135,27 +129,25 @@ class ChannelMonitor(
     }
     
     /**
+     * 🔧 FIXED: Unified entity processing for both channels and groups
      * Extract both plain text and formatted text from message content
-     * FIXED: Use the same working entity processing for both channels and groups
      * Returns Pair<plainText, formattedText>
      */
-    private fun extractMessageContent(content: TdApi.MessageContent, isChannelPost: Boolean = false): Pair<String, String> {
+    private fun extractMessageContent(content: TdApi.MessageContent): Pair<String, String> {
         return when (content) {
             is TdApi.MessageText -> {
                 val plainText = content.text.text
                 val formattedText = convertFormattedTextToMarkdown(content.text)
                 logger.debug { "Text message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 
-                // Keep debug logging for troubleshooting
-                if (isChannelPost) {
-                    if (content.text.entities.isNotEmpty()) {
-                        logger.debug { "Channel post entities: ${content.text.entities.size} entities found" }
-                        content.text.entities.forEach { entity ->
-                            logger.debug { "Entity: ${entity.type.javaClass.simpleName} at ${entity.offset}-${entity.offset + entity.length}" }
-                        }
-                    } else {
-                        logger.debug { "Channel post has no entities" }
+                // 🔧 FIXED: Unified logging for both channels and groups
+                if (content.text.entities.isNotEmpty()) {
+                    logger.debug { "Message entities: ${content.text.entities.size} entities found" }
+                    content.text.entities.forEach { entity ->
+                        logger.debug { "Entity: ${entity.type.javaClass.simpleName} at ${entity.offset}-${entity.offset + entity.length}" }
                     }
+                } else {
+                    logger.debug { "Message has no entities" }
                 }
                 
                 Pair(plainText, formattedText)
@@ -186,8 +178,8 @@ class ChannelMonitor(
     }
     
     /**
-     * FIXED: Convert TDLib FormattedText to MarkdownV2 using the original working method
-     * This method works correctly for both channels and groups
+     * 🔧 FIXED: Unified MarkdownV2 conversion for both channels and groups
+     * This method now works consistently for all message types
      */
     private fun convertFormattedTextToMarkdown(formattedText: TdApi.FormattedText): String {
         if (formattedText.entities.isEmpty()) {
@@ -212,7 +204,7 @@ class ChannelMonitor(
                 // Get the entity text
                 val entityText = text.substring(entity.offset, entity.offset + entity.length)
                 
-                // Handle different entity types with enhanced converter
+                // 🔧 FIXED: Unified entity handling for all message types
                 when (entity.type) {
                     is TdApi.TextEntityTypeBold -> {
                         result.append("*${TelegramMarkdownConverter.escapeForFormatting(entityText)}*")
@@ -322,7 +314,7 @@ class ChannelMonitor(
             
             val finalResult = result.toString()
             
-            // DEBUG: Log the actual generated MarkdownV2 to identify the issue
+            // 🔧 FIXED: Consistent debug logging and validation
             logger.debug { "Generated MarkdownV2 (${finalResult.length} chars): $finalResult" }
             
             // Use converter's validation
@@ -336,47 +328,6 @@ class ChannelMonitor(
         } catch (e: Exception) {
             logger.warn(e) { "Error converting formatted text, using escaped plain text" }
             return TelegramMarkdownConverter.escapeMarkdownV2(formattedText.text)
-        }
-    }
-    
-    /**
-     * NEW: Fallback formatting detection for channel posts
-     * Detects common formatting patterns when entities are missing
-     */
-    private fun detectAndConvertChannelFormatting(text: String): String {
-        try {
-            // Look for common formatting patterns in the text itself
-            var result = text
-            
-            // Detect lines that look like headers (all caps, short lines)
-            val lines = result.split("\n")
-            val processedLines = lines.map { line ->
-                val trimmed = line.trim()
-                when {
-                    // ALL CAPS lines that are short (likely headers)
-                    trimmed.matches(Regex("^[A-Z\\s]{2,20}$")) && trimmed.length < 20 -> {
-                        "*${TelegramMarkdownConverter.escapeForFormatting(trimmed)}*"
-                    }
-                    // Lines that start with emojis followed by caps (likely sections)
-                    trimmed.matches(Regex("^[\\p{So}\\p{Cn}]+\\s+[A-Z][A-Z\\s]+$")) && trimmed.length < 30 -> {
-                        "*${TelegramMarkdownConverter.escapeForFormatting(trimmed)}*"
-                    }
-                    // Lines that look like bullet points
-                    trimmed.matches(Regex("^[•\\-\\*]\\s+.+$")) -> {
-                        TelegramMarkdownConverter.escapeMarkdownV2(line)
-                    }
-                    else -> TelegramMarkdownConverter.escapeMarkdownV2(line)
-                }
-            }
-            
-            result = processedLines.joinToString("\n")
-            
-            logger.debug { "Applied fallback formatting patterns" }
-            return result
-            
-        } catch (e: Exception) {
-            logger.warn(e) { "Error in fallback formatting detection" }
-            return TelegramMarkdownConverter.escapeMarkdownV2(text)
         }
     }
     
