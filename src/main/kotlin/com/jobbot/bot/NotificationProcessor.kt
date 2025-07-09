@@ -149,20 +149,14 @@ class NotificationProcessor(
             }
             
             // Create MarkdownV2 link: [@channelname](https://t.me/channelname/123)
-            // Use proper escaping for both link text and URL
             val escapedLinkText = TelegramMarkdownConverter.escapeForFormatting(linkDisplayText)
             val escapedUrl = TelegramMarkdownConverter.escapeUrlInLink(notification.messageLink)
             val markdownLink = "[$escapedLinkText]($escapedUrl)"
             
-            // Build header with the link, then escape the entire header
-            val rawHeaderWithLink = Localization.getMessage(language, "notification.job.match.header", markdownLink)
-            
-            // Need to escape everything EXCEPT the markdown link we just created
-            // So we'll temporarily replace the link, escape, then restore
-            val linkPlaceholder = "###LINK_PLACEHOLDER###"
-            val textToEscape = rawHeaderWithLink.replace(markdownLink, linkPlaceholder)
-            val escapedHeader = TelegramMarkdownConverter.escapeMarkdownV2(textToEscape)
-            val finalHeader = escapedHeader.replace(linkPlaceholder, markdownLink)
+            // Build header - escape the template first, then insert the link
+            val headerTemplate = Localization.getMessage(language, "notification.job.match.header", "{0}")
+            val escapedTemplate = TelegramMarkdownConverter.escapeMarkdownV2(headerTemplate)
+            val finalHeader = escapedTemplate.replace("{0}", markdownLink)
             
             markdownParts.add(finalHeader)
             
