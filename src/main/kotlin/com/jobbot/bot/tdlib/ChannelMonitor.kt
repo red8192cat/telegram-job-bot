@@ -329,7 +329,7 @@ class ChannelMonitor(
     }
     
     // Safer tag extraction without dangerous reflection
-    private fun extractChannelTag(chat: TdApi.Chat, client: Client?): String? {
+    fun extractChannelTag(chat: TdApi.Chat, client: Client?): String? {
         return try {
             when (val chatType = chat.type) {
                 is TdApi.ChatTypeSupergroup -> {
