@@ -153,13 +153,17 @@ class NotificationProcessor(
             val escapedUrl = TelegramMarkdownConverter.escapeUrlInLink(notification.messageLink)
             val markdownLink = "[$escapedLinkText]($escapedUrl)"
             
-            // Build header - escape the template first, then insert the link
-            val headerTemplate = Localization.getMessage(language, "notification.job.match.header", "{0}")
-            val escapedTemplate = TelegramMarkdownConverter.escapeMarkdownV2(headerTemplate)
-            val finalHeader = escapedTemplate.replace("{0}", markdownLink)
+            // Get the raw localization template and escape it
+            val rawTemplate = Localization.getMessage(language, "notification.job.match.header", "PLACEHOLDER")
+            val templateWithPlaceholder = rawTemplate.replace("PLACEHOLDER", "{0}")
+            val escapedTemplate = TelegramMarkdownConverter.escapeMarkdownV2(templateWithPlaceholder)
+            val finalHeader = escapedTemplate.replace("\\{0\\}", markdownLink).replace("{0}", markdownLink)
             
             markdownParts.add(finalHeader)
             
+            logger.debug { "Raw template: $rawTemplate" }
+            logger.debug { "Template with placeholder: $templateWithPlaceholder" }
+            logger.debug { "Escaped template: $escapedTemplate" }
             logger.debug { "Created MarkdownV2 link: $markdownLink" }
             logger.debug { "Final header: $finalHeader" }
         } else {
