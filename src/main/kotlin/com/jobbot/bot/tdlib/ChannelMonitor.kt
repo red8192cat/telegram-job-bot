@@ -85,20 +85,17 @@ class ChannelMonitor(
                             else -> if (isChannelPost) "Channel" else "Group"
                         }
                         
-                        val senderUsername = extractSenderUsername(message, client)
-                        logger.debug { "Creating ChannelMessage with senderUsername: $senderUsername" }
-                        
-                        // Generate message link
+                        // Generate message link (for both channels and groups)
                         val messageLink = generateMessageLink(channelDetails, message.id)
                         
-                        // Create ChannelMessage with both plain and formatted text
+                        // Create ChannelMessage with simplified data
                         val channelMessage = ChannelMessage(
                             channelId = channelId,
                             channelName = displayName,
                             messageId = message.id,
                             text = plainText, // For keyword matching
                             formattedText = formattedText, // For user notifications
-                            senderUsername = senderUsername,
+                            senderUsername = null, // Not needed anymore
                             messageLink = messageLink
                         )
                         
@@ -331,157 +328,6 @@ class ChannelMonitor(
         }
     }
     
-    private fun extractSenderUsername(message: TdApi.Message, client: Client?): String? {
-        return try {
-            when (val senderId = message.senderId) {
-                is TdApi.MessageSenderUser -> {
-                    val userId = senderId.userId
-                    getUserUsername(userId, client)
-                }
-                is TdApi.MessageSenderChat -> {
-                    val chatId = senderId.chatId
-                    getChatUsername(chatId, client)
-                }
-                else -> null
-            }
-        } catch (e: Exception) {
-            logger.debug { "Failed to extract sender username: ${e.message}" }
-            null
-        }
-    }
-
-    private fun getUserUsername(userId: Long, client: Client?): String? {
-        return try {
-            val deferred = CompletableDeferred<String?>()
-            
-            client?.send(TdApi.GetUser(userId)) { result ->
-                when (result) {
-                    is TdApi.User -> {
-                        val username = try {
-                            // Access usernames.editableUsername field
-                            val usernamesField = result.javaClass.getDeclaredField("usernames")
-                            usernamesField.isAccessible = true
-                            val usernames = usernamesField.get(result)
-                            
-                            if (usernames != null) {
-                                val editableUsernameField = usernames.javaClass.getDeclaredField("editableUsername")
-                                editableUsernameField.isAccessible = true
-                                val editableUsername = editableUsernameField.get(usernames) as? String
-                                
-                                if (!editableUsername.isNullOrEmpty()) {
-                                    logger.debug { "Found username: $editableUsername" }
-                                    "@$editableUsername"
-                                } else {
-                                    logger.debug { "No editable username found for user $userId" }
-                                    null
-                                }
-                            } else {
-                                logger.debug { "No usernames object found for user $userId" }
-                                null
-                            }
-                        } catch (e: Exception) {
-                            logger.debug { "Could not extract username for user $userId: ${e.message}" }
-                            null
-                        }
-                        
-                        deferred.complete(username)
-                    }
-                    is TdApi.Error -> {
-                        logger.debug { "Could not get user $userId: ${result.message}" }
-                        deferred.complete(null)
-                    }
-                }
-            }
-            
-            runBlocking {
-                withTimeout(2000) { deferred.await() }
-            }
-        } catch (e: Exception) {
-            logger.debug { "Failed to get username for user $userId: ${e.message}" }
-            null
-        }
-    }
-
-    private fun getChatUsername(chatId: Long, client: Client?): String? {
-        return try {
-            val deferred = CompletableDeferred<String?>()
-            
-            client?.send(TdApi.GetChat(chatId)) { result ->
-                when (result) {
-                    is TdApi.Chat -> {
-                        val username = extractChannelTag(result, client)
-                        deferred.complete(username)
-                    }
-                    is TdApi.Error -> {
-                        logger.debug { "Could not get chat $chatId: ${result.message}" }
-                        deferred.complete(null)
-                    }
-                }
-            }
-            
-            runBlocking {
-                withTimeout(2000) { deferred.await() }
-            }
-        } catch (e: Exception) {
-            logger.debug { "Failed to get username for chat $chatId: ${e.message}" }
-            null
-        }
-    }
-    
-    // Safer tag extraction without dangerous reflection
-    fun extractChannelTag(chat: TdApi.Chat, client: Client?): String? {
-        return try {
-            when (val chatType = chat.type) {
-                is TdApi.ChatTypeSupergroup -> {
-                    // Try to get supergroup info for username
-                    val deferred = CompletableDeferred<String?>()
-                    
-                    client?.send(TdApi.GetSupergroup(chatType.supergroupId)) { result ->
-                        when (result) {
-                            is TdApi.Supergroup -> {
-                                // SAFER: Use try-catch for reflection instead of assuming field exists
-                                val username = try {
-                                    val usernameField = result.javaClass.getDeclaredField("username")
-                                    usernameField.isAccessible = true
-                                    val value = usernameField.get(result) as? String
-                                    if (!value.isNullOrEmpty()) "@$value" else null
-                                } catch (e: NoSuchFieldException) {
-                                    logger.debug { "Username field not available in TDLib version - this is expected" }
-                                    null
-                                } catch (e: SecurityException) {
-                                    logger.debug { "Cannot access username field due to security restrictions" }
-                                    null
-                                } catch (e: Exception) {
-                                    logger.debug { "Could not extract username via reflection: ${e.message}" }
-                                    null
-                                }
-                                deferred.complete(username)
-                            }
-                            is TdApi.Error -> {
-                                logger.debug { "Could not get supergroup info: ${result.message}" }
-                                deferred.complete(null)
-                            }
-                        }
-                    }
-                    
-                    // Wait briefly for the result, but don't block
-                    try {
-                        runBlocking {
-                            withTimeout(2000) { deferred.await() }
-                        }
-                    } catch (e: Exception) {
-                        logger.debug { "Timeout getting supergroup username - continuing without tag" }
-                        null
-                    }
-                }
-                else -> null
-            }
-        } catch (e: Exception) {
-            logger.debug { "Error extracting channel tag: ${e.message}" }
-            null
-        }
-    }
-    
     private fun isMonitoredGroupChat(chatId: Long): Boolean {
         // Check if this chat ID matches any of our monitored channels/groups
         val channelId = getChannelIdentifier(chatId)
@@ -501,7 +347,7 @@ class ChannelMonitor(
     }
     
     /**
-     * Generate a Telegram message link with proper TDLib to Bot API message ID conversion
+     * Generate a Telegram message link for both channels and groups
      */
     private fun generateMessageLink(channelDetails: ChannelDetails?, tdlibMessageId: Long): String? {
         return try {
@@ -517,7 +363,7 @@ class ChannelMonitor(
             logger.debug { "Converted TDLib ID $tdlibMessageId to public ID $publicMessageId" }
             
             when {
-                // For public channels with @username
+                // For public channels/groups with @username
                 !channelDetails.channelTag.isNullOrBlank() -> {
                     val cleanTag = channelDetails.channelTag.removePrefix("@")
                     if (cleanTag.isNotEmpty()) {
@@ -525,7 +371,7 @@ class ChannelMonitor(
                     } else null
                 }
                 
-                // For supergroups with -100 prefix
+                // For private supergroups/channels with -100 prefix
                 channelDetails.channelId.startsWith("-100") -> {
                     val chatId = channelDetails.channelId.substring(4) // Remove "-100"
                     "https://t.me/c/$chatId/$publicMessageId"

@@ -16,15 +16,14 @@ import org.telegram.telegrambots.meta.exceptions.TelegramApiException
 import java.util.concurrent.LinkedBlockingQueue
 
 /**
- * FIXED NotificationProcessor with null-safe message building
+ * SIMPLIFIED NotificationProcessor - Clean copy of original post
  * 
- * Strategy: Multi-layered approach for maximum formatting success
- * 1. Try formatted MarkdownV2 (from TDLib entities)
- * 2. Try enhanced converter on formatted text
- * 3. Try enhanced converter on plain text
- * 4. Fallback to plain text (guaranteed delivery)
+ * Format:
+ * 1. "New match from [channel]"
+ * 2. Link to original post (if available)
+ * 3. Original content with all formatting preserved
  * 
- * FIXED: Handles null senderUsername properly without breaking MarkdownV2
+ * Strategy: Try MarkdownV2 first, fallback to plain text
  */
 class NotificationProcessor(
     private val database: Database,
@@ -36,13 +35,9 @@ class NotificationProcessor(
     private val notificationQueue = LinkedBlockingQueue<NotificationMessage>(1000)
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     
-    // Enhanced tracking for multi-layered approach
-    private var formattingLayerSuccess = mutableMapOf<String, Int>(
-        "raw_markdown" to 0,
-        "enhanced_formatted" to 0,
-        "enhanced_plain" to 0,
-        "plain_fallback" to 0
-    )
+    // Simple tracking
+    private var markdownSuccess = 0
+    private var plainFallback = 0
     private var totalNotifications = 0
     
     init {
@@ -66,7 +61,7 @@ class NotificationProcessor(
     
     private fun startNotificationProcessor() {
         scope.launch {
-            logger.info { "Notification processor started with ENHANCED multi-layered formatting" }
+            logger.info { "Notification processor started with simplified formatting" }
             
             while (isActive) {
                 try {
@@ -106,14 +101,12 @@ class NotificationProcessor(
             val user = database.getUser(notification.userId)
             val language = user?.language ?: "en"
             
-            // Build complete message content
-            val messageContent = buildMessageContent(notification, language)
+            // Build the simple message
+            val (markdownContent, plainContent) = buildSimpleMessage(notification, language)
             
-            // 🎯 ENHANCED STRATEGY: Multi-layered approach for maximum success
-            val success = sendWithMultiLayeredApproach(
-                chatId = notification.userId.toString(),
-                messageContent = messageContent
-            )
+            // Try MarkdownV2 first, then fallback to plain text
+            val success = tryMarkdownV2(notification.userId.toString(), markdownContent) ||
+                         sendPlainText(notification.userId.toString(), plainContent)
             
             if (success) {
                 logger.debug { "Notification delivered to user ${notification.userId}" }
@@ -124,11 +117,9 @@ class NotificationProcessor(
         } catch (e: TelegramApiException) {
             logger.error(e) { "Telegram API error for user ${notification.userId}" }
             
-            // Handle user-unreachable scenarios
             if (isUserUnreachableError(e)) {
                 logger.warn { "User ${notification.userId} is unreachable: ${e.message}" }
             } else {
-                // Retry other API errors
                 delay(10000)
                 notificationQueue.offer(notification)
             }
@@ -140,148 +131,73 @@ class NotificationProcessor(
     }
     
     /**
-     * 🔧 FIXED: Build enhanced message content with null-safe sender handling
+     * Build simple message: header with clickable channel link + original content
      */
-    private fun buildMessageContent(notification: NotificationMessage, language: String): EnhancedMessageContent {
-        // 🔧 FIXED: Null-safe sender text building
-        val senderText = buildSenderText(notification, language)
+    private fun buildSimpleMessage(notification: NotificationMessage, language: String): Pair<String, String> {
+        val channelName = notification.channelName ?: "Channel"
+        val originalContent = notification.formattedMessageText ?: notification.messageText
         
-        // Get the job text in different formats
-        val rawFormattedText = notification.formattedMessageText
-        val plainJobText = TextUtils.truncateText(notification.messageText, 4000)
+        // Build MarkdownV2 version
+        val markdownParts = mutableListOf<String>()
         
-        // 🔧 FIXED: Null-safe header building
-        val headerWithLink = if (!notification.messageLink.isNullOrBlank()) {
-            val linkText = notification.channelName ?: "Channel"
-            val prettyLink = "[$linkText](${notification.messageLink})"
-            Localization.getMessage(language, "notification.job.match.header.with.link", prettyLink)
-        } else {
-            Localization.getMessage(language, "notification.job.match.header", notification.channelName ?: "Channel")
-        }
-        
-        val plainHeader = if (!notification.messageLink.isNullOrBlank()) {
-            "${Localization.getMessage(language, "notification.job.match.header", notification.channelName ?: "Channel")}\n🔗 ${notification.messageLink}"
-        } else {
-            Localization.getMessage(language, "notification.job.match.header", notification.channelName ?: "Channel")
-        }
-        
-        // Create different formatting approaches
-        val approaches = mutableMapOf<String, String>()
-        
-        // 1. Raw formatted text (if available)
-        if (!rawFormattedText.isNullOrBlank() && rawFormattedText != plainJobText) {
-            val rawMessage = if (senderText.isNotBlank()) {
-                "$headerWithLink\n$senderText\n\n$rawFormattedText"
+        // Build header with clickable channel link
+        if (!notification.messageLink.isNullOrBlank()) {
+            val linkDisplayText = if (channelName.startsWith("@")) {
+                channelName // Already has @
             } else {
-                "$headerWithLink\n\n$rawFormattedText"
+                "@$channelName" // Add @ for display
             }
-            approaches["raw_markdown"] = rawMessage
-            logger.debug { "Raw markdown approach built: ${rawMessage.length} chars" }
-        }
-        
-        // 2. Enhanced converter on formatted text
-        if (!rawFormattedText.isNullOrBlank()) {
-            try {
-                val enhancedFormatted = TelegramMarkdownConverter.createFormattedMessage(
-                    header = headerWithLink,
-                    content = rawFormattedText,
-                    footer = senderText.takeIf { it.isNotBlank() },
-                    headerFormat = TelegramMarkdownConverter.MessageFormat.NONE,
-                    escapeContent = false // Already formatted
-                )
-                approaches["enhanced_formatted"] = enhancedFormatted
-                logger.debug { "Enhanced formatted approach built: ${enhancedFormatted.length} chars" }
-            } catch (e: Exception) {
-                logger.debug { "Failed to create enhanced formatted message: ${e.message}" }
-            }
-        }
-        
-        // 3. Enhanced converter on plain text
-        try {
-            val enhancedPlain = TelegramMarkdownConverter.createFormattedMessage(
-                header = notification.channelName ?: "Channel",
-                content = plainJobText,
-                footer = if (!notification.messageLink.isNullOrBlank()) "🔗 ${notification.messageLink}" else null,
-                headerFormat = TelegramMarkdownConverter.MessageFormat.BOLD,
-                escapeContent = true
-            )
-            approaches["enhanced_plain"] = enhancedPlain
-            logger.debug { "Enhanced plain approach built: ${enhancedPlain.length} chars" }
-        } catch (e: Exception) {
-            logger.debug { "Failed to create enhanced plain message: ${e.message}" }
-        }
-        
-        // 4. Plain text fallback (guaranteed to work)
-        val plainMessage = if (senderText.isNotBlank()) {
-            "$plainHeader\n$senderText\n\n$plainJobText"
+            
+            // Create MarkdownV2 link: [@channelname](https://t.me/channelname/123)
+            val escapedLinkText = TelegramMarkdownConverter.escapeForFormatting(linkDisplayText)
+            val escapedUrl = TelegramMarkdownConverter.escapeUrlInLink(notification.messageLink)
+            val markdownLink = "[$escapedLinkText]($escapedUrl)"
+            
+            val headerWithLink = Localization.getMessage(language, "notification.job.match.header", markdownLink)
+            markdownParts.add(headerWithLink)
         } else {
-            "$plainHeader\n\n$plainJobText"
+            // No link available, use plain header
+            val header = Localization.getMessage(language, "notification.job.match.header", channelName)
+            markdownParts.add(TelegramMarkdownConverter.escapeMarkdownV2(header))
         }
-        approaches["plain_fallback"] = plainMessage
-        logger.debug { "Plain fallback approach built: ${plainMessage.length} chars" }
         
-        return EnhancedMessageContent(approaches)
+        // Add original content (preserve formatting if available)
+        if (!originalContent.isNullOrBlank()) {
+            markdownParts.add(originalContent)
+        }
+        
+        val markdownContent = markdownParts.joinToString("\n\n")
+        
+        // Build plain text version
+        val plainParts = mutableListOf<String>()
+        
+        if (!notification.messageLink.isNullOrBlank()) {
+            val headerWithLink = Localization.getMessage(language, "notification.job.match.header", notification.messageLink)
+            plainParts.add(headerWithLink)
+        } else {
+            val header = Localization.getMessage(language, "notification.job.match.header", channelName)
+            plainParts.add(header)
+        }
+        
+        if (!notification.messageText.isNullOrBlank()) {
+            plainParts.add(notification.messageText)
+        }
+        
+        val plainContent = plainParts.joinToString("\n\n")
+        
+        logger.debug { "Built message - markdown: ${markdownContent.length} chars, plain: ${plainContent.length} chars" }
+        
+        return Pair(markdownContent, plainContent)
     }
     
     /**
-     * 🎯 ENHANCED STRATEGY: Multi-layered approach for maximum formatting success
-     * Try different formatting approaches in order of sophistication
+     * Try sending with MarkdownV2
      */
-    private suspend fun sendWithMultiLayeredApproach(
-        chatId: String, 
-        messageContent: EnhancedMessageContent
-    ): Boolean {
-        
-        val approaches = listOf(
-            "raw_markdown",
-            "enhanced_formatted", 
-            "enhanced_plain",
-            "plain_fallback"
-        )
-        
-        for (approach in approaches) {
-            val content = messageContent.approaches[approach]
-            if (content == null) {
-                logger.debug { "Approach $approach not available for user $chatId" }
-                continue
-            }
-            
-            val success = when (approach) {
-                "plain_fallback" -> {
-                    // Plain text - guaranteed to work
-                    sendPlainTextGuaranteed(chatId, content)
-                }
-                else -> {
-                    // Try MarkdownV2 with this approach
-                    tryMarkdownV2(chatId, content, approach)
-                }
-            }
-            
-            if (success) {
-                formattingLayerSuccess[approach] = formattingLayerSuccess[approach]!! + 1
-                logger.debug { "✅ Successfully sent notification using approach: $approach" }
-                return true
-            }
-            
-            logger.debug { "❌ Approach $approach failed for user $chatId, trying next..." }
-        }
-        
-        // This should never happen since plain_fallback is guaranteed
-        logger.error { "🚨 CRITICAL: All approaches failed for user $chatId" }
-        return false
-    }
-    
-    /**
-     * Try sending with MarkdownV2 using specified approach
-     */
-    private suspend fun tryMarkdownV2(chatId: String, content: String, approach: String): Boolean {
+    private suspend fun tryMarkdownV2(chatId: String, content: String): Boolean {
         return try {
-            logger.debug { "Trying MarkdownV2 with approach: $approach for user $chatId" }
-            
-            // 🔧 FIXED: Enhanced pre-validation with detailed logging
+            // Quick validation
             if (TelegramMarkdownConverter.hasUnbalancedMarkup(content)) {
-                logger.debug { "Content has unbalanced markup, skipping approach: $approach" }
-                logger.debug { "Problematic content (first 200 chars): ${content.take(200)}" }
+                logger.debug { "Content has unbalanced markup, using plain text fallback" }
                 return false
             }
             
@@ -292,49 +208,42 @@ class NotificationProcessor(
                 .linkPreviewOptions(LinkPreviewOptions.builder().isDisabled(true).build())
                 .build()
             
-            // Aggressive timeout for quick fallback
             withTimeout(3000) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(markdownMessage)
                 }
             }
             
-            logger.debug { "✅ MarkdownV2 success with approach: $approach for user $chatId" }
+            markdownSuccess++
+            logger.debug { "✅ MarkdownV2 success for user $chatId" }
             true
             
         } catch (e: TimeoutCancellationException) {
-            logger.debug { "⏰ MarkdownV2 timeout with approach: $approach for user $chatId" }
+            logger.debug { "⏰ MarkdownV2 timeout for user $chatId" }
             false
             
         } catch (e: TelegramApiException) {
             if (isFormattingError(e)) {
-                val errorType = classifyFormattingError(e)
-                logger.debug { "🔧 MarkdownV2 $errorType with approach: $approach for user $chatId" }
-                // 🔧 FIXED: Log the actual problematic content for debugging
-                logger.debug { "Problematic content (first 500 chars): ${content.take(500)}" }
+                logger.debug { "🔧 MarkdownV2 formatting error for user $chatId: ${e.message}" }
                 false
             } else {
-                // Re-throw non-formatting errors
                 throw e
             }
             
         } catch (e: Exception) {
-            logger.debug { "❌ MarkdownV2 unexpected error with approach: $approach for user $chatId: ${e.javaClass.simpleName}" }
+            logger.debug { "❌ MarkdownV2 unexpected error for user $chatId: ${e.javaClass.simpleName}" }
             false
         }
     }
     
     /**
-     * 🛡️ BULLETPROOF: Send plain text with absolute guarantee
+     * Send plain text (guaranteed to work)
      */
-    private suspend fun sendPlainTextGuaranteed(chatId: String, plainContent: String): Boolean {
+    private suspend fun sendPlainText(chatId: String, content: String): Boolean {
         return try {
-            logger.debug { "📝 Sending plain text for user $chatId" }
-            
             val plainMessage = SendMessage.builder()
                 .chatId(chatId)
-                .text(plainContent)
-                // NO parseMode = 100% safe
+                .text(content)
                 .linkPreviewOptions(LinkPreviewOptions.builder().isDisabled(true).build())
                 .build()
             
@@ -342,6 +251,7 @@ class NotificationProcessor(
                 telegramClient.execute(plainMessage)
             }
             
+            plainFallback++
             logger.debug { "✅ Plain text delivered for user $chatId" }
             true
             
@@ -352,7 +262,7 @@ class NotificationProcessor(
     }
     
     /**
-     * Detect formatting-related errors that should trigger fallback
+     * Detect formatting-related errors
      */
     private fun isFormattingError(e: TelegramApiException): Boolean {
         val message = e.message?.lowercase() ?: ""
@@ -361,31 +271,11 @@ class NotificationProcessor(
                message.contains("escaped") ||
                message.contains("entities") ||
                message.contains("markdown") ||
-               message.contains("parse mode") ||
-               message.contains("invalid") ||
-               message.contains("unexpected") ||
-               message.contains("character") ||
-               message.contains("offset")
+               message.contains("parse mode")
     }
     
     /**
-     * Classify the type of formatting error for better debugging
-     */
-    private fun classifyFormattingError(e: TelegramApiException): String {
-        val message = e.message?.lowercase() ?: ""
-        return when {
-            message.contains("can't parse") -> "parse error"
-            message.contains("reserved") -> "reserved character"
-            message.contains("escaped") -> "escape error"
-            message.contains("entities") -> "entity error"
-            message.contains("offset") -> "offset error"
-            message.contains("character") -> "character error"
-            else -> "formatting error"
-        }
-    }
-    
-    /**
-     * Detect user-unreachable errors that shouldn't be retried
+     * Detect user-unreachable errors
      */
     private fun isUserUnreachableError(e: TelegramApiException): Boolean {
         val message = e.message?.lowercase() ?: ""
@@ -397,76 +287,18 @@ class NotificationProcessor(
     }
     
     /**
-     * 🔧 FIXED: Null-safe sender text building
-     */
-    private fun buildSenderText(notification: NotificationMessage, language: String): String {
-        val senderUsername = notification.senderUsername
-        val channelName = notification.channelName
-        
-        return when {
-            senderUsername.isNullOrBlank() -> {
-                logger.debug { "No sender username available, skipping sender text" }
-                ""
-            }
-            senderUsername.equals(channelName, ignoreCase = true) -> {
-                logger.debug { "Sender username same as channel name, skipping sender text" }
-                ""
-            }
-            else -> {
-                // Check if localization key exists and is not empty
-                val senderText = Localization.getMessage(language, "notification.sender.posted_by", senderUsername)
-                if (senderText.startsWith("[") && senderText.endsWith("]")) {
-                    // Key not found - return empty (disabled)
-                    logger.debug { "Sender notification disabled via localization" }
-                    ""
-                } else {
-                    logger.debug { "Built sender text: $senderText" }
-                    senderText
-                }
-            }
-        }
-    }
-    
-    /**
-     * Optimized statistics logging - only logs when there's actual activity
+     * Simple statistics logging
      */
     private fun startPeriodicStatsLogging() {
         scope.launch {
-            var lastReportedTotal = 0
-            
             while (isActive) {
-                delay(600000) // Every 10 minutes (reduced frequency)
+                delay(600000) // Every 10 minutes
                 
-                // Only log if there's been new activity since last report
-                if (totalNotifications > lastReportedTotal && totalNotifications > 0) {
-                    val totalFormatted = formattingLayerSuccess.values.sum() - formattingLayerSuccess["plain_fallback"]!!
-                    val overallSuccessRate = (totalFormatted.toDouble() / totalNotifications * 100).toInt()
-                    
+                if (totalNotifications > 0) {
+                    val successRate = (markdownSuccess.toDouble() / totalNotifications * 100).toInt()
                     logger.debug { 
-                        "📊 ENHANCED Formatting stats: $overallSuccessRate% formatted delivery rate " +
-                        "($totalFormatted/$totalNotifications) with multi-layered approach"
-                    }
-                    
-                    // Detailed breakdown
-                    formattingLayerSuccess.forEach { (layer, count) ->
-                        val rate = (count.toDouble() / totalNotifications * 100).toInt()
-                        logger.debug { "  └─ $layer: $count notifications ($rate%)" }
-                    }
-                    
-                    // Alert if overall success rate is low
-                    if (overallSuccessRate < 60 && totalNotifications > 10) {
-                        logger.warn { 
-                            "📉 Overall formatting success rate is low ($overallSuccessRate%). " +
-                            "Most notifications are falling back to plain text."
-                        }
-                    }
-                    
-                    lastReportedTotal = totalNotifications
-                } else if (totalNotifications == 0) {
-                    // Only log "no activity" once every hour to avoid spam
-                    delay(3000000) // Additional 50 minutes = 1 hour total
-                    if (totalNotifications == 0) {
-                        logger.debug { "📊 No notifications processed in the last hour" }
+                        "📊 Notification stats: $successRate% MarkdownV2 success " +
+                        "($markdownSuccess formatted, $plainFallback plain, $totalNotifications total)"
                     }
                 }
             }
@@ -476,41 +308,25 @@ class NotificationProcessor(
     fun getQueueSize(): Int = notificationQueue.size
     
     fun getFormattingStats(): Map<String, Any> {
-        val totalFormatted = formattingLayerSuccess.values.sum() - formattingLayerSuccess["plain_fallback"]!!
         return mapOf(
             "total" to totalNotifications,
-            "formattedDeliveries" to totalFormatted,
-            "plainFallbacks" to formattingLayerSuccess["plain_fallback"]!!,
-            "overallSuccessRate" to if (totalNotifications > 0) (totalFormatted * 100 / totalNotifications) else 0,
-            "layerBreakdown" to formattingLayerSuccess.toMap()
+            "markdownSuccess" to markdownSuccess,
+            "plainFallback" to plainFallback,
+            "successRate" to if (totalNotifications > 0) (markdownSuccess * 100 / totalNotifications) else 0
         )
     }
     
     fun shutdown() {
         logger.info { "Shutting down notification processor..." }
         
-        // Log final enhanced stats
         if (totalNotifications > 0) {
-            val totalFormatted = formattingLayerSuccess.values.sum() - formattingLayerSuccess["plain_fallback"]!!
-            val successRate = (totalFormatted.toDouble() / totalNotifications * 100).toInt()
+            val successRate = (markdownSuccess.toDouble() / totalNotifications * 100).toInt()
             logger.debug { 
-                "📊 Final ENHANCED stats: $successRate% formatted delivery rate " +
-                "($totalFormatted/$totalNotifications total notifications)"
-            }
-            
-            formattingLayerSuccess.forEach { (layer, count) ->
-                val rate = (count.toDouble() / totalNotifications * 100).toInt()
-                logger.debug { "  └─ Final $layer: $count notifications ($rate%)" }
+                "📊 Final stats: $successRate% MarkdownV2 success " +
+                "($markdownSuccess formatted, $plainFallback plain, $totalNotifications total)"
             }
         }
         
         scope.cancel()
     }
-    
-    /**
-     * Enhanced message content with multiple formatting approaches
-     */
-    private data class EnhancedMessageContent(
-        val approaches: Map<String, String>
-    )
 }
