@@ -330,7 +330,6 @@ class AdminPremiumHandler(
                 "admin.premium.grant.confirm.details",
                 userId,
                 username,
-                0, // No command count in simplified model
                 userId,
                 userId
             )

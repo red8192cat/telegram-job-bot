@@ -170,7 +170,6 @@ class AdminUserHandler(
             "admin.user.ban.confirm.details",
             userId,
             username,
-            0, // No command count in simplified model
             userId,
             userId
         )
