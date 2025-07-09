@@ -143,7 +143,7 @@ class NotificationProcessor(
      * Build enhanced message content with multiple formatting versions
      */
     private fun buildMessageContent(notification: NotificationMessage, language: String): EnhancedMessageContent {
-        val senderText = buildSenderText(notification)
+        val senderText = buildSenderText(notification, language)
         
         // Get the job text in different formats
         val rawFormattedText = notification.formattedMessageText
@@ -159,9 +159,9 @@ class NotificationProcessor(
         }
         
         val plainHeader = if (!notification.messageLink.isNullOrBlank()) {
-            "📢 New Match from ${notification.channelName}\n🔗 ${notification.messageLink}"
+            "${Localization.getMessage(language, "notification.job.match.header", notification.channelName)}\n🔗 ${notification.messageLink}"
         } else {
-            "📢 New Match from ${notification.channelName}"
+            Localization.getMessage(language, "notification.job.match.header", notification.channelName)
         }
         
         // Create different formatting approaches
@@ -388,30 +388,42 @@ class NotificationProcessor(
                message.contains("kicked")
     }
     
-    private fun buildSenderText(notification: NotificationMessage): String {
+    private fun buildSenderText(notification: NotificationMessage, language: String): String {
         val senderUsername = notification.senderUsername
         val channelName = notification.channelName
         
         return when {
             senderUsername.isNullOrBlank() -> ""
             senderUsername.equals(channelName, ignoreCase = true) -> ""
-            else -> "👤 Posted by: $senderUsername"
+            else -> {
+                // Check if localization key exists and is not empty
+                val senderText = Localization.getMessage(language, "notification.sender.posted_by", senderUsername)
+                if (senderText.startsWith("[") && senderText.endsWith("]")) {
+                    // Key not found - return empty (disabled)
+                    ""
+                } else {
+                    senderText
+                }
+            }
         }
     }
     
     /**
-     * Enhanced statistics logging with multi-layer breakdown
+     * Optimized statistics logging - only logs when there's actual activity
      */
     private fun startPeriodicStatsLogging() {
         scope.launch {
+            var lastReportedTotal = 0
+            
             while (isActive) {
-                delay(300000) // Every 5 minutes
+                delay(600000) // Every 10 minutes (reduced frequency)
                 
-                if (totalNotifications > 0) {
+                // Only log if there's been new activity since last report
+                if (totalNotifications > lastReportedTotal && totalNotifications > 0) {
                     val totalFormatted = formattingLayerSuccess.values.sum() - formattingLayerSuccess["plain_fallback"]!!
                     val overallSuccessRate = (totalFormatted.toDouble() / totalNotifications * 100).toInt()
                     
-                    logger.info { 
+                    logger.debug { 
                         "📊 ENHANCED Formatting stats: $overallSuccessRate% formatted delivery rate " +
                         "($totalFormatted/$totalNotifications) with multi-layered approach"
                     }
@@ -419,7 +431,7 @@ class NotificationProcessor(
                     // Detailed breakdown
                     formattingLayerSuccess.forEach { (layer, count) ->
                         val rate = (count.toDouble() / totalNotifications * 100).toInt()
-                        logger.info { "  └─ $layer: $count notifications ($rate%)" }
+                        logger.debug { "  └─ $layer: $count notifications ($rate%)" }
                     }
                     
                     // Alert if overall success rate is low
@@ -428,6 +440,14 @@ class NotificationProcessor(
                             "📉 Overall formatting success rate is low ($overallSuccessRate%). " +
                             "Most notifications are falling back to plain text."
                         }
+                    }
+                    
+                    lastReportedTotal = totalNotifications
+                } else if (totalNotifications == 0) {
+                    // Only log "no activity" once every hour to avoid spam
+                    delay(3000000) // Additional 50 minutes = 1 hour total
+                    if (totalNotifications == 0) {
+                        logger.debug { "📊 No notifications processed in the last hour" }
                     }
                 }
             }
@@ -454,14 +474,14 @@ class NotificationProcessor(
         if (totalNotifications > 0) {
             val totalFormatted = formattingLayerSuccess.values.sum() - formattingLayerSuccess["plain_fallback"]!!
             val successRate = (totalFormatted.toDouble() / totalNotifications * 100).toInt()
-            logger.info { 
+            logger.debug { 
                 "📊 Final ENHANCED stats: $successRate% formatted delivery rate " +
                 "($totalFormatted/$totalNotifications total notifications)"
             }
             
             formattingLayerSuccess.forEach { (layer, count) ->
                 val rate = (count.toDouble() / totalNotifications * 100).toInt()
-                logger.info { "  └─ Final $layer: $count notifications ($rate%)" }
+                logger.debug { "  └─ Final $layer: $count notifications ($rate%)" }
             }
         }
         
