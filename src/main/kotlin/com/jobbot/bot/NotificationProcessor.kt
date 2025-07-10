@@ -137,6 +137,7 @@ class NotificationProcessor(
     
     /**
      * NEW: Send media notification with original content
+     * FIXED: Handle TDLib/Bot API file ID incompatibility 
      */
     private suspend fun sendMediaNotification(notification: NotificationMessage, language: String): Boolean {
         return try {
@@ -147,14 +148,16 @@ class NotificationProcessor(
             val headerText = buildHeaderText(channelName, language, notification.messageLink)
             
             when {
-                // Multiple media items - use media group
+                // Multiple media items - try media group first, fallback to text
                 notification.mediaGroup.size > 1 -> {
-                    sendMediaGroup(chatId, notification, headerText, language)
+                    sendMediaGroup(chatId, notification, headerText, language) ||
+                    sendTextWithMediaFallback(chatId, notification, headerText, language)
                 }
                 
-                // Single media item - send individual media
+                // Single media item - try individual media first, fallback to text
                 notification.mediaGroup.size == 1 -> {
-                    sendSingleMedia(chatId, notification.mediaGroup[0], notification.messageText, headerText, language)
+                    sendSingleMedia(chatId, notification.mediaGroup[0], notification.messageText, headerText, language) ||
+                    sendTextWithMediaFallback(chatId, notification, headerText, language)
                 }
                 
                 else -> {
@@ -277,6 +280,9 @@ class NotificationProcessor(
             if (isFormattingError(e)) {
                 logger.debug { "🔧 Media group caption formatting error for user $chatId, trying without markdown" }
                 return sendMediaGroupPlain(chatId, notification, headerText, language)
+            } else if (isFileIdError(e)) {
+                logger.warn { "🚨 TDLib/Bot API file ID incompatibility for media group user $chatId: ${e.message}" }
+                return false // Will trigger text fallback in parent method
             } else {
                 throw e
             }
@@ -459,6 +465,9 @@ class NotificationProcessor(
             if (isFormattingError(e)) {
                 logger.debug { "🔧 Single media caption formatting error for user $chatId, trying without markdown" }
                 return sendSingleMediaPlain(chatId, mediaItem, originalText, headerText, language)
+            } else if (isFileIdError(e)) {
+                logger.warn { "🚨 TDLib/Bot API file ID incompatibility for user $chatId: ${e.message}" }
+                return false // Will trigger text fallback in parent method
             } else {
                 throw e
             }
@@ -683,6 +692,13 @@ class NotificationProcessor(
             logger.debug { "✅ Plain single media sent successfully for user $chatId (${mediaItem.type})" }
             true
             
+        } catch (e: TelegramApiException) {
+            if (isFileIdError(e)) {
+                logger.warn { "🚨 TDLib/Bot API file ID incompatibility for plain media user $chatId: ${e.message}" }
+                return false // Will trigger text fallback in parent method
+            } else {
+                throw e
+            }
         } catch (e: Exception) {
             logger.error(e) { "Failed to send plain single media to user $chatId" }
             false
@@ -735,13 +751,76 @@ class NotificationProcessor(
     }
     
     /**
-     * Build media caption (header + original text)
+     * NEW: Fallback when media can't be sent - send text with media info
      */
-    private fun buildMediaCaption(headerText: String, originalText: String): String {
-        return if (originalText.isNotBlank()) {
-            "$headerText\n\n$originalText"
-        } else {
-            headerText
+    private suspend fun sendTextWithMediaFallback(
+        chatId: String,
+        notification: NotificationMessage,
+        headerText: String,
+        language: String
+    ): Boolean {
+        return try {
+            logger.info { "Using text fallback for media notification to user $chatId (${notification.mediaGroup.size} media items)" }
+            
+            // Build message content
+            val parts = mutableListOf<String>()
+            
+            // Add the header (plain text version)
+            val cleanHeader = headerText
+                .replace(Regex("\\[[^\\]]*\\]\\([^\\)]*\\)"), "") // Remove links
+                .replace(Regex("\\\\(.)"), "$1") // Remove escape characters  
+                .replace(Regex("[*_`~|\\[\\](){}#+=!.-]"), "") // Remove formatting chars
+                .replace(Regex("\\s+"), " ") // Normalize whitespace
+                .trim()
+            
+            parts.add(cleanHeader)
+            
+            // Add media info
+            when (notification.mediaGroup.size) {
+                1 -> {
+                    val mediaItem = notification.mediaGroup[0]
+                    val mediaTypeText = when (mediaItem.type) {
+                        MediaType.PHOTO -> "📷 Photo"
+                        MediaType.VIDEO -> "🎥 Video"
+                        MediaType.ANIMATION -> "🎬 Animation/GIF"
+                        MediaType.DOCUMENT -> "📄 Document"
+                        MediaType.AUDIO -> "🎵 Audio"
+                        MediaType.VOICE -> "🎤 Voice Note"
+                        MediaType.VIDEO_NOTE -> "📹 Video Note" 
+                        MediaType.STICKER -> "🎭 Sticker"
+                    }
+                    parts.add("[$mediaTypeText attached in original message]")
+                }
+                else -> {
+                    parts.add("[${notification.mediaGroup.size} media items attached in original message]")
+                }
+            }
+            
+            // Add original text if available
+            if (!notification.messageText.isNullOrBlank()) {
+                parts.add(notification.messageText)
+            }
+            
+            val finalMessage = parts.joinToString("\n\n")
+            
+            // Send as plain text message
+            val sendMessage = SendMessage.builder()
+                .chatId(chatId)
+                .text(finalMessage)
+                .linkPreviewOptions(LinkPreviewOptions.builder().isDisabled(true).build())
+                .build()
+            
+            withContext(Dispatchers.IO) {
+                telegramClient.execute(sendMessage)
+            }
+            
+            textSuccess++
+            logger.debug { "✅ Text fallback with media info sent successfully for user $chatId" }
+            true
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to send text fallback for user $chatId" }
+            false
         }
     }
     
@@ -916,6 +995,17 @@ class NotificationProcessor(
                message.contains("chat not found") ||
                message.contains("deactivated") ||
                message.contains("kicked")
+    }
+    
+    /**
+     * Build media caption (header + original text)
+     */
+    private fun buildMediaCaption(headerText: String, originalText: String): String {
+        return if (originalText.isNotBlank()) {
+            "$headerText\n\n$originalText"
+        } else {
+            headerText
+        }
     }
     
     /**
