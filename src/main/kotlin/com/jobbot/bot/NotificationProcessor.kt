@@ -986,6 +986,17 @@ class NotificationProcessor(
     }
     
     /**
+     * Detect file ID related errors (TDLib vs Bot API incompatibility)
+     */
+    private fun isFileIdError(e: TelegramApiException): Boolean {
+        val message = e.message?.lowercase() ?: ""
+        return message.contains("wrong file identifier") ||
+               message.contains("file not found") ||
+               message.contains("bad request: file") ||
+               message.contains("invalid file id")
+    }
+    
+    /**
      * Detect user-unreachable errors
      */
     private fun isUserUnreachableError(e: TelegramApiException): Boolean {
