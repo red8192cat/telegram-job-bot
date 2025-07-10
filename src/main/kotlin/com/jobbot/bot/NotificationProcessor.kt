@@ -259,10 +259,10 @@ class NotificationProcessor(
                 return false
             }
             
-            // Send media group - FIXED: Convert MutableList to List
+            // Send media group - FIXED: Use ArrayList and proper method
             val sendMediaGroup = SendMediaGroup.builder()
                 .chatId(chatId)
-                .media(mediaItems.toList()) // Convert MutableList to List
+                .medias(ArrayList(mediaItems)) // Use medias() method with ArrayList
                 .build()
             
             withContext(Dispatchers.IO) {
@@ -510,10 +510,10 @@ class NotificationProcessor(
             }
             
             if (mediaItems.isNotEmpty()) {
-                // FIXED: Convert MutableList to List
+                // FIXED: Use ArrayList and proper method
                 val sendMediaGroup = SendMediaGroup.builder()
                     .chatId(chatId)
-                    .media(mediaItems.toList()) // Convert MutableList to List
+                    .medias(ArrayList(mediaItems)) // Use medias() method with ArrayList
                     .build()
                 
                 withContext(Dispatchers.IO) {
