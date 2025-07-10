@@ -4,8 +4,8 @@ import com.jobbot.shared.getLogger
 import java.util.regex.Pattern
 
 /**
- * Enhanced Telegram MarkdownV2 converter for the JobBot project
- * ADDED: Proper link text escaping for MarkdownV2 links
+ * Simplified Telegram MarkdownV2 converter for the JobBot project
+ * CLEANED: Removed redundant validation methods - let Telegram API handle validation
  */
 object TelegramMarkdownConverter {
     private val logger = getLogger("TelegramMarkdownConverter")
@@ -25,7 +25,7 @@ object TelegramMarkdownConverter {
     private val MD_QUOTE_PATTERN = Pattern.compile("""^>\s*(.*)$""", Pattern.MULTILINE)
     
     /**
-     * NEW: Escape text specifically for use inside MarkdownV2 link text [text](url)
+     * Escape text specifically for use inside MarkdownV2 link text [text](url)
      * Only escapes characters that could break the link, NOT [ and ]
      */
     fun escapeForLinkText(text: String): String {
@@ -87,9 +87,9 @@ object TelegramMarkdownConverter {
                 "_${escapeForFormatting(match.group(1))}_"
             }
             
-            // Process links - FIXED: Use proper link text escaping
+            // Process links - Use proper link text escaping
             result = MD_LINK_PATTERN.matcher(result).replaceAll { match ->
-                val linkText = escapeForLinkText(match.group(1))  // Use new method
+                val linkText = escapeForLinkText(match.group(1))
                 val url = escapeUrlInLink(match.group(2))
                 "[$linkText]($url)"
             }
@@ -192,66 +192,6 @@ object TelegramMarkdownConverter {
     }
     
     /**
-     * Check if text contains potentially problematic MarkdownV2 patterns
-     */
-    fun hasUnbalancedMarkup(markdown: String): Boolean {
-        return try {
-            // Check for unbalanced brackets (critical for links)
-            val openBrackets = markdown.count { it == '[' }
-            val closeBrackets = markdown.count { it == ']' }
-            val openParens = markdown.count { it == '(' }
-            val closeParens = markdown.count { it == ')' }
-            
-            if (openBrackets != closeBrackets || openParens != closeParens) {
-                return true
-            }
-            
-            // Check for unclosed code blocks
-            val tripleBackticks = markdown.split("```").size - 1
-            if (tripleBackticks % 2 != 0) {
-                return true
-            }
-            
-            // Check for reasonable length
-            if (markdown.length > 4096) {
-                return true
-            }
-            
-            false
-        } catch (e: Exception) {
-            true
-        }
-    }
-    
-    /**
-     * Validate if text is properly formatted Telegram MarkdownV2
-     */
-    fun isValidTelegramMarkdown(text: String): Boolean {
-        return try {
-            // Check if it has MarkdownV2 patterns
-            val hasMarkdownPatterns = listOf(
-                """\*[^*\n]+\*""",          // bold
-                """_[^_\n]+_""",            // italic
-                """__[^_\n]+__""",          // underline
-                """~[^~\n]+~""",            // strikethrough
-                """\|\|[^|]+\|\|""",        // spoiler
-                """`[^`\n]+`""",            // inline code
-                """```[\s\S]*?```""",       // code block
-                """\[[^\]]+\]\([^)]+\)""",  // links
-                """^>\s*.*$"""              // quotes
-            ).any { pattern ->
-                Pattern.compile(pattern, Pattern.MULTILINE).matcher(text).find()
-            }
-            
-            // Check that it doesn't have unbalanced markup
-            hasMarkdownPatterns && !hasUnbalancedMarkup(text)
-            
-        } catch (e: Exception) {
-            false
-        }
-    }
-    
-    /**
      * Convert a plain text message to safe MarkdownV2
      * Useful for ensuring any text can be sent with MarkdownV2 parse mode
      */
@@ -306,4 +246,3 @@ object TelegramMarkdownConverter {
 fun String.toTelegramMarkdown(): String = TelegramMarkdownConverter.markdownToTelegram(this)
 fun String.escapeMarkdownV2(): String = TelegramMarkdownConverter.escapeMarkdownV2(this)
 fun String.escapeForLinkText(): String = TelegramMarkdownConverter.escapeForLinkText(this)
-fun String.isValidTelegramMarkdown(): Boolean = TelegramMarkdownConverter.isValidTelegramMarkdown(this)

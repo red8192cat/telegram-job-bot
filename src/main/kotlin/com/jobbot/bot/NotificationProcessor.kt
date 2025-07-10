@@ -6,7 +6,6 @@ import com.jobbot.infrastructure.monitoring.ErrorTracker
 import com.jobbot.infrastructure.security.RateLimiter
 import com.jobbot.shared.getLogger
 import com.jobbot.shared.localization.Localization
-import com.jobbot.shared.utils.TextUtils
 import com.jobbot.shared.utils.TelegramMarkdownConverter
 import kotlinx.coroutines.*
 import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient
@@ -16,14 +15,14 @@ import org.telegram.telegrambots.meta.exceptions.TelegramApiException
 import java.util.concurrent.LinkedBlockingQueue
 
 /**
- * FIXED NotificationProcessor - Proper MarkdownV2 link handling
+ * CLEANED NotificationProcessor - Removed redundant pre-validation
  * 
  * Format:
  * 1. "New match from [channel]"
  * 2. Link to original post (if available)
  * 3. Original content with all formatting preserved
  * 
- * Strategy: Try MarkdownV2 first, fallback to plain text
+ * Strategy: Try MarkdownV2 first, fallback to plain text on API errors
  */
 class NotificationProcessor(
     private val database: Database,
@@ -131,7 +130,7 @@ class NotificationProcessor(
     }
     
     /**
-     * FIXED: Build simple message with proper MarkdownV2 link handling
+     * Build simple message with proper MarkdownV2 link handling
      */
     private fun buildSimpleMessage(notification: NotificationMessage, language: String): Pair<String, String> {
         val channelName = notification.channelName ?: "Channel"
@@ -148,7 +147,7 @@ class NotificationProcessor(
                 "@$channelName" // Add @ for display
             }
             
-            // FIXED: For MarkdownV2 links, properly escape only the content inside the link text
+            // For MarkdownV2 links, properly escape only the content inside the link text
             // Do NOT escape [ and ] as they are part of the link syntax [text](url)
             val safeLinkText = linkDisplayText
                 .replace("\\", "\\\\")  // Escape backslashes first
@@ -214,16 +213,10 @@ class NotificationProcessor(
     }
     
     /**
-     * Try sending with MarkdownV2
+     * Try sending with MarkdownV2 - let Telegram API validate the content
      */
     private suspend fun tryMarkdownV2(chatId: String, content: String): Boolean {
         return try {
-            // Quick validation
-            if (TelegramMarkdownConverter.hasUnbalancedMarkup(content)) {
-                logger.debug { "Content has unbalanced markup, using plain text fallback" }
-                return false
-            }
-            
             val markdownMessage = SendMessage.builder()
                 .chatId(chatId)
                 .text(content)
