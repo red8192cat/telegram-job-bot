@@ -9,6 +9,7 @@ import com.jobbot.infrastructure.config.Config
 import com.jobbot.infrastructure.monitoring.ErrorTracker
 import com.jobbot.infrastructure.monitoring.HealthCheckServer
 import com.jobbot.infrastructure.monitoring.SystemMonitor
+import com.jobbot.infrastructure.services.PremiumExpirationService
 import com.jobbot.shared.AdminNotificationManager
 import com.jobbot.shared.getLogger
 import com.jobbot.shared.localization.Localization
@@ -44,6 +45,7 @@ class Application {
     private lateinit var messageProcessor: MessageProcessor
     private lateinit var telegramBotsApplication: TelegramBotsLongPollingApplication
     private lateinit var healthCheckServer: HealthCheckServer
+    private lateinit var premiumExpirationService: PremiumExpirationService
     
     // Bot components
     private var bot: TelegramBot? = null
@@ -69,33 +71,39 @@ class Application {
         logger.info { "Initializing core services..." }
         messageProcessor = MessageProcessor(database)
         
-        // 4. Initialize Telegram Bot API for v9.x
+        // 4. Initialize premium expiration service
+        logger.info { "Initializing premium expiration service..." }
+        premiumExpirationService = PremiumExpirationService(database)
+        premiumExpirationService.start()
+        logger.info { "Premium expiration service started successfully" }
+        
+        // 5. Initialize Telegram Bot API for v9.x
         logger.info { "Initializing Telegram Bot API..." }
         telegramBotsApplication = TelegramBotsLongPollingApplication()
         
-        // 5. Initialize TelegramUser if TDLib config is available
+        // 6. Initialize TelegramUser if TDLib config is available
         if (Config.hasTdLibConfig()) {
             initializeTdlibMode(config)
         } else {
             initializeBotOnlyMode(config)
         }
         
-        // 6. Wire up admin notification service
+        // 7. Wire up admin notification service
         setupAdminNotificationService()
         
-        // 7. Set up bot commands menu
+        // 8. Set up bot commands menu
         setupBotCommands()
         
-        // 8. Initialize health check server
+        // 9. Initialize health check server
         healthCheckServer = HealthCheckServer(database, telegramUser)
         
-        // 9. Set up shutdown hook
+        // 10. Set up shutdown hook
         setupShutdownHook()
         
-        // 10. Send startup notification
+        // 11. Send startup notification
         sendStartupNotification(config)
         
-        // 11. Start health check server and keep application running
+        // 12. Start health check server and keep application running
         startHealthCheckAndKeepAlive()
     }
     
@@ -234,6 +242,7 @@ class Application {
         logger.info { "Connection pool: ${currentPoolStats["maximumPoolSize"]} max, ${currentPoolStats["minimumIdle"]} min idle" }
         logger.info { "TDLib enabled: ${telegramUser != null}" }
         logger.info { "Rate limits: ${config.rateLimitMessagesPerMinute} msg/min, ${config.rateLimitBurstSize} burst" }
+        logger.info { "Premium expiration: Automatic every 6 hours" }
         logger.info { "Bot is running..." }
         
         // Start health check server and keep application running
@@ -252,25 +261,30 @@ class Application {
         logger.info { "Starting application shutdown..." }
         
         try {
-            // 1. Close database connection pool FIRST (most critical)
+            // 1. Stop premium expiration service first
+            logger.info { "Stopping premium expiration service..." }
+            premiumExpirationService.stop()
+            logger.info { "Premium expiration service stopped" }
+            
+            // 2. Close database connection pool FIRST (most critical)
             logger.info { "Closing database connection pool..." }
             database.close()
             logger.info { "Database connection pool closed successfully" }
             
-            // 2. Close bot components
+            // 3. Close bot components
             logger.info { "Shutting down bot components..." }
             bot?.shutdown()
             logger.info { "Bot shutdown complete" }
             
-            // 3. Close TelegramUser
+            // 4. Close TelegramUser
             logger.info { "Shutting down TelegramUser..." }
             telegramUser?.shutdown()
             logger.info { "TelegramUser shutdown complete" }
             
-            // 4. Admin notification service doesn't need explicit shutdown (it just holds bot reference)
+            // 5. Admin notification service doesn't need explicit shutdown (it just holds bot reference)
             logger.info { "Admin notification service shutdown complete" }
             
-            // 5. Close Telegram Bots Application
+            // 6. Close Telegram Bots Application
             logger.info { "Shutting down Telegram Bots Application..." }
             telegramBotsApplication.close()
             logger.info { "Telegram Bots Application closed" }

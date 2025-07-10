@@ -23,6 +23,7 @@ import java.time.format.DateTimeFormatter
 /**
  * Handles the admin dashboard with hierarchical navigation
  * BULLETPROOF: NO MARKDOWN - Works with any system data
+ * UPDATED: Premium management merged into users menu - single column layout
  */
 class AdminDashboardHandler(
     private val database: Database,
@@ -66,6 +67,7 @@ class AdminDashboardHandler(
     
     private fun createMainDashboardText(): String {
         val activeUsers = database.getActiveUsersCount()
+        val premiumUsers = database.getPremiumUserCount()
         val channels = database.getAllChannels()
         val rateLimitStatus = rateLimiter.getRateLimitStatus()
         val recentErrors = ErrorTracker.getRecentErrors(5)
@@ -83,8 +85,9 @@ class AdminDashboardHandler(
         return "${Localization.getAdminMessage("admin.dashboard.title")}$shutdownText\n\n" +
                "${Localization.getAdminMessage("admin.dashboard.server.time", serverTime)}\n\n" +
                Localization.getAdminMessage(
-                   "admin.dashboard.quick.status",
+                   "admin.dashboard.quick.status.with.premium",
                    activeUsers,
+                   premiumUsers,
                    channels.size,
                    recentErrors.size,
                    rateLimitStatus["overloadedUsers"] ?: 0,
@@ -94,6 +97,7 @@ class AdminDashboardHandler(
                )
     }
     
+    // UPDATED: Single column layout - premium button removed
     private fun createMainDashboardKeyboard(): InlineKeyboardMarkup {
         val buttons = mutableListOf<InlineKeyboardRow>()
         
@@ -135,7 +139,7 @@ class AdminDashboardHandler(
         return InlineKeyboardMarkup.builder().keyboard(buttons).build()
     }
     
-    // SYSTEM SUBMENU - NO MARKDOWN for reliability
+    // SYSTEM SUBMENU - NO MARKDOWN for reliability (existing code)
     fun createSystemMenu(chatId: String, messageId: Int): EditMessageText {
         val systemText = Localization.getAdminMessage("admin.system.menu.title")
         val keyboard = createSystemMenuKeyboard()
@@ -189,7 +193,6 @@ class AdminDashboardHandler(
                 .build()
         ))
         
-        // 🔧 NEW: Add List Admins button
         buttons.add(InlineKeyboardRow(
             InlineKeyboardButton.builder()
                 .text(Localization.getAdminMessage("admin.system.button.list.admins"))
@@ -223,7 +226,6 @@ class AdminDashboardHandler(
         return InlineKeyboardMarkup.builder().keyboard(buttons).build()
     }
     
-    // 🔧 NEW: List Admins Page
     fun createListAdminsPage(chatId: String, messageId: Int): EditMessageText {
         val adminList = config.authorizedAdminIds.mapIndexed { index, adminId ->
             Localization.getAdminMessage("admin.list.admins.item", index + 1, adminId.toString())
@@ -314,9 +316,18 @@ class AdminDashboardHandler(
         return InlineKeyboardMarkup.builder().keyboard(buttons).build()
     }
     
-    // USERS SUBMENU - NO MARKDOWN for reliability
+    // UPDATED: USERS SUBMENU with premium management - single column layout
     fun createUsersMenu(chatId: String, messageId: Int): EditMessageText {
-        val usersText = Localization.getAdminMessage("admin.users.menu.title")
+        val totalUsers = database.getActiveUsersCount()
+        val premiumUsers = database.getPremiumUserCount()
+        val bannedUsers = database.getAllBannedUsers().size
+        
+        val usersText = Localization.getAdminMessage(
+            "admin.users.menu.title.with.premium",
+            totalUsers,
+            premiumUsers,
+            bannedUsers
+        )
         val keyboard = createUsersMenuKeyboard()
         
         return EditMessageText.builder()
@@ -328,9 +339,11 @@ class AdminDashboardHandler(
             .build()
     }
     
+    // UPDATED: Single column layout with premium buttons
     private fun createUsersMenuKeyboard(): InlineKeyboardMarkup {
         val buttons = mutableListOf<InlineKeyboardRow>()
         
+        // Rate limiting
         buttons.add(InlineKeyboardRow(
             InlineKeyboardButton.builder()
                 .text(Localization.getAdminMessage("admin.users.button.rate.limits"))
@@ -345,6 +358,7 @@ class AdminDashboardHandler(
                 .build()
         ))
         
+        // User moderation
         buttons.add(InlineKeyboardRow(
             InlineKeyboardButton.builder()
                 .text(Localization.getAdminMessage("admin.users.button.banned"))
@@ -366,6 +380,28 @@ class AdminDashboardHandler(
                 .build()
         ))
         
+        // ADDED: Premium management buttons
+        buttons.add(InlineKeyboardRow(
+            InlineKeyboardButton.builder()
+                .text(Localization.getAdminMessage("admin.users.button.premium.list"))
+                .switchInlineQueryCurrentChat("/admin premium_users")
+                .build()
+        ))
+        
+        buttons.add(InlineKeyboardRow(
+            InlineKeyboardButton.builder()
+                .text(Localization.getAdminMessage("admin.users.button.premium.grant"))
+                .callbackData("admin_grant_premium")
+                .build()
+        ))
+        
+        buttons.add(InlineKeyboardRow(
+            InlineKeyboardButton.builder()
+                .text(Localization.getAdminMessage("admin.users.button.premium.revoke"))
+                .callbackData("admin_revoke_premium")
+                .build()
+        ))
+        
         buttons.add(InlineKeyboardRow(
             InlineKeyboardButton.builder()
                 .text(Localization.getAdminMessage("admin.common.button.back"))
@@ -376,7 +412,77 @@ class AdminDashboardHandler(
         return InlineKeyboardMarkup.builder().keyboard(buttons).build()
     }
     
-    // SYSTEM LOG LEVEL SUBMENU - NO MARKDOWN for reliability
+    // UPDATED: Grant Premium Menu - back to users menu
+    fun createGrantPremiumMenu(chatId: String, messageId: Int): EditMessageText {
+        val grantText = Localization.getAdminMessage("admin.premium.grant.instructions")
+        val keyboard = createGrantPremiumKeyboard()
+        
+        return EditMessageText.builder()
+            .chatId(chatId)
+            .messageId(messageId)
+            .text(grantText)
+            // NO parseMode - bulletproof
+            .replyMarkup(keyboard)
+            .build()
+    }
+    
+    // UPDATED: Back button goes to users menu
+    private fun createGrantPremiumKeyboard(): InlineKeyboardMarkup {
+        val buttons = mutableListOf<InlineKeyboardRow>()
+        
+        buttons.add(InlineKeyboardRow(
+            InlineKeyboardButton.builder()
+                .text(Localization.getAdminMessage("admin.premium.grant.button.enter"))
+                .switchInlineQueryCurrentChat("/admin grant_premium ")
+                .build()
+        ))
+        
+        buttons.add(InlineKeyboardRow(
+            InlineKeyboardButton.builder()
+                .text(Localization.getAdminMessage("admin.common.button.back"))
+                .callbackData("admin_users_menu")  // CHANGED: was admin_premium_menu
+                .build()
+        ))
+        
+        return InlineKeyboardMarkup.builder().keyboard(buttons).build()
+    }
+    
+    // UPDATED: Revoke Premium Menu - back to users menu
+    fun createRevokePremiumMenu(chatId: String, messageId: Int): EditMessageText {
+        val revokeText = Localization.getAdminMessage("admin.premium.revoke.instructions")
+        val keyboard = createRevokePremiumKeyboard()
+        
+        return EditMessageText.builder()
+            .chatId(chatId)
+            .messageId(messageId)
+            .text(revokeText)
+            // NO parseMode - bulletproof
+            .replyMarkup(keyboard)
+            .build()
+    }
+    
+    // UPDATED: Back button goes to users menu
+    private fun createRevokePremiumKeyboard(): InlineKeyboardMarkup {
+        val buttons = mutableListOf<InlineKeyboardRow>()
+        
+        buttons.add(InlineKeyboardRow(
+            InlineKeyboardButton.builder()
+                .text(Localization.getAdminMessage("admin.premium.revoke.button.enter"))
+                .switchInlineQueryCurrentChat("/admin revoke_premium ")
+                .build()
+        ))
+        
+        buttons.add(InlineKeyboardRow(
+            InlineKeyboardButton.builder()
+                .text(Localization.getAdminMessage("admin.common.button.back"))
+                .callbackData("admin_users_menu")  // CHANGED: was admin_premium_menu
+                .build()
+        ))
+        
+        return InlineKeyboardMarkup.builder().keyboard(buttons).build()
+    }
+    
+    // Rest of the system log level and other methods remain unchanged...
     fun createSystemLogLevelMenu(chatId: String, messageId: Int): EditMessageText {
         val currentLevel = LogManager.getCurrentLogLevel()
         val logLevelText = Localization.getAdminMessage("admin.system.log.level.title") + "\n\n" +
@@ -417,7 +523,6 @@ class AdminDashboardHandler(
         return InlineKeyboardMarkup.builder().keyboard(buttons).build()
     }
     
-    // TDLIB LOG LEVEL SUBMENU - NO MARKDOWN for reliability
     fun createTdlibLogLevelMenu(chatId: String, messageId: Int): EditMessageText {
         val currentLevel = TdlibLogManager.getCurrentLogLevel()
         val logLevelText = Localization.getAdminMessage("admin.tdlib.log.level.title") + "\n\n" +
@@ -458,12 +563,10 @@ class AdminDashboardHandler(
         return InlineKeyboardMarkup.builder().keyboard(buttons).build()
     }
     
-    // TDLIB AUTHENTICATION SUBMENU - NO MARKDOWN for reliability
     fun createTdlibAuthMenu(chatId: String, messageId: Int): EditMessageText {
         val authText = if (telegramUser?.isConnected() == true) {
             Localization.getAdminMessage("admin.tdlib.auth.connected")
         } else {
-            // Check what type of auth is needed
             val authState = TdlibAuthManager.getAuthState()
             when (authState) {
                 "WAITING_CODE" -> Localization.getAdminMessage("admin.tdlib.auth.code.needed")
@@ -550,7 +653,7 @@ class AdminDashboardHandler(
         return InlineKeyboardMarkup.builder().keyboard(buttons).build()
     }
     
-    // RATE SETTINGS SUBMENU - NO MARKDOWN for reliability
+    // Rate settings and other menus remain unchanged...
     fun createRateSettingsMenu(chatId: String, messageId: Int): EditMessageText {
         val rateLimitStatus = rateLimiter.getRateLimitStatus()
         val currentSettings = Localization.getAdminMessage(
@@ -597,7 +700,6 @@ class AdminDashboardHandler(
         return InlineKeyboardMarkup.builder().keyboard(buttons).build()
     }
     
-    // BAN USER SUBMENU - NO MARKDOWN for reliability
     fun createBanUserMenu(chatId: String, messageId: Int): EditMessageText {
         val banText = Localization.getAdminMessage("admin.ban.user.instructions")
         val keyboard = createBanUserKeyboard()
@@ -631,7 +733,6 @@ class AdminDashboardHandler(
         return InlineKeyboardMarkup.builder().keyboard(buttons).build()
     }
     
-    // UNBAN USER SUBMENU - NO MARKDOWN for reliability
     fun createUnbanUserMenu(chatId: String, messageId: Int): EditMessageText {
         val unbanText = Localization.getAdminMessage("admin.unban.user.instructions")
         val keyboard = createUnbanUserKeyboard()
@@ -665,7 +766,6 @@ class AdminDashboardHandler(
         return InlineKeyboardMarkup.builder().keyboard(buttons).build()
     }
     
-    // EMERGENCY SHUTDOWN CONFIRMATION - NO MARKDOWN for reliability
     fun createShutdownConfirmation(chatId: String, messageId: Int): EditMessageText {
         val health = SystemMonitor.getSystemHealth(database.getActiveUsersCount(), database.getAllChannels().size)
         
@@ -700,7 +800,6 @@ class AdminDashboardHandler(
             .build()
     }
     
-    // SHUTDOWN EXECUTE - NO MARKDOWN for reliability
     fun handleShutdownExecute(chatId: String, messageId: Int): EditMessageText {
         BotShutdownManager.initiateShutdown("Emergency shutdown via admin dashboard")
         
@@ -730,7 +829,6 @@ class AdminDashboardHandler(
             .build()
     }
     
-    // CANCEL SHUTDOWN - NO MARKDOWN for reliability
     fun handleCancelShutdownCallback(chatId: String, messageId: Int): EditMessageText {
         BotShutdownManager.cancelShutdown()
         
@@ -754,7 +852,6 @@ class AdminDashboardHandler(
             .build()
     }
     
-    // LOG LEVEL HANDLERS - NO MARKDOWN for reliability
     fun handleSystemLogLevelChange(chatId: String, messageId: Int, level: String): EditMessageText {
         val success = LogManager.setLogLevel(level)
         
@@ -809,7 +906,6 @@ class AdminDashboardHandler(
             .build()
     }
     
-    // TDLIB AUTH HELPERS - NO MARKDOWN for reliability
     fun showTdlibAuthHelp(chatId: String, messageId: Int): EditMessageText {
         val helpText = Localization.getAdminMessage("admin.tdlib.auth.help")
         

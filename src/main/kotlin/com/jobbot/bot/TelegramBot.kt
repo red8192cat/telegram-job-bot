@@ -215,7 +215,6 @@ class TelegramBot(
             try {
                 val actualUserInfo = userInfo ?: database.getUserInfo(userId)
                 val username = actualUserInfo?.username?.let { "(@$it)" } ?: "(no username)"
-                val commandCount = actualUserInfo?.commandCount ?: 0
                 val banStatus = if (actualUserInfo?.isBanned == true) "Banned" else "Not banned"
                 
                 val timestamp = java.time.LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
@@ -224,7 +223,7 @@ class TelegramBot(
                 ) + "\n" + Localization.getAdminMessage(
                     "admin.notification.rate.limit.timestamp", timestamp
                 ) + "\n\n" + Localization.getAdminMessage(
-                    "admin.notification.rate.limit.details", userId, username, commandCount, banStatus
+                    "admin.notification.rate.limit.details", userId, username, banStatus
                 )
                 
                 val buttons = listOf(
@@ -242,13 +241,12 @@ class TelegramBot(
                     )
                 )
                 
-                // 🔧 UPDATED: Send rate limit alerts to ALL authorized admins
+                // Send rate limit alerts to ALL authorized admins
                 for (adminId in config.authorizedAdminIds) {
                     try {
                         val sendMessage = SendMessage.builder()
                             .chatId(adminId.toString())
                             .text(alertText)
-                            // NO parseMode - usernames can have special characters
                             .replyMarkup(InlineKeyboardMarkup.builder().keyboard(buttons).build())
                             .build()
                         
@@ -259,7 +257,6 @@ class TelegramBot(
                         logger.debug { "Rate limit alert sent to admin $adminId for user $userId" }
                     } catch (e: Exception) {
                         logger.warn(e) { "Failed to send rate limit alert to admin $adminId" }
-                        // Continue sending to other admins even if one fails
                     }
                 }
                 
