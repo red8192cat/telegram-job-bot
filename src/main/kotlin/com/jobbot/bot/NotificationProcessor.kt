@@ -259,10 +259,10 @@ class NotificationProcessor(
                 return false
             }
             
-            // Send media group
+            // Send media group - FIXED: Convert MutableList to List
             val sendMediaGroup = SendMediaGroup.builder()
                 .chatId(chatId)
-                .media(mediaItems)
+                .media(mediaItems.toList()) // Convert MutableList to List
                 .build()
             
             withContext(Dispatchers.IO) {
@@ -510,9 +510,10 @@ class NotificationProcessor(
             }
             
             if (mediaItems.isNotEmpty()) {
+                // FIXED: Convert MutableList to List
                 val sendMediaGroup = SendMediaGroup.builder()
                     .chatId(chatId)
-                    .media(mediaItems)
+                    .media(mediaItems.toList()) // Convert MutableList to List
                     .build()
                 
                 withContext(Dispatchers.IO) {
@@ -835,10 +836,11 @@ class NotificationProcessor(
         logger.info { "Shutting down notification processor..." }
         
         if (totalNotifications > 0) {
-            val successRate = (markdownSuccess.toDouble() / totalNotifications * 100).toInt()
+            val mediaRate = (mediaSuccess.toDouble() / totalNotifications * 100).toInt()
+            val textRate = (textSuccess.toDouble() / totalNotifications * 100).toInt()
             logger.debug { 
-                "📊 Final stats: $successRate% MarkdownV2 success " +
-                "($markdownSuccess formatted, $plainFallback plain, $totalNotifications total)"
+                "📊 Final stats: ${mediaRate}% media, ${textRate}% text success " +
+                "($mediaSuccess media, $textSuccess text, $plainFallback plain, $totalNotifications total)"
             }
         }
         
