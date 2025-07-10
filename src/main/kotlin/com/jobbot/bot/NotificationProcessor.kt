@@ -570,13 +570,117 @@ class NotificationProcessor(
                     }
                 }
                 
-                else -> {
-                    // For other media types, send the media then follow with plain text
-                    return false
+                MediaType.ANIMATION -> {
+                    val sendAnimation = SendAnimation.builder()
+                        .chatId(chatId)
+                        .animation(InputFile(mediaItem.fileId))
+                        .caption(plainCaption)
+                        .build()
+                    
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(sendAnimation)
+                    }
+                }
+                
+                MediaType.DOCUMENT -> {
+                    val sendDocument = SendDocument.builder()
+                        .chatId(chatId)
+                        .document(InputFile(mediaItem.fileId))
+                        .caption(plainCaption)
+                        .build()
+                    
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(sendDocument)
+                    }
+                }
+                
+                MediaType.AUDIO -> {
+                    val sendAudio = SendAudio.builder()
+                        .chatId(chatId)
+                        .audio(InputFile(mediaItem.fileId))
+                        .caption(plainCaption)
+                        .build()
+                    
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(sendAudio)
+                    }
+                }
+                
+                MediaType.VOICE -> {
+                    val sendVoice = SendVoice.builder()
+                        .chatId(chatId)
+                        .voice(InputFile(mediaItem.fileId))
+                        .apply {
+                            mediaItem.duration?.let { duration(it) }
+                        }
+                        .build()
+                    
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(sendVoice)
+                    }
+                    
+                    // Send caption separately (voice notes don't support captions)
+                    val followUpMessage = SendMessage.builder()
+                        .chatId(chatId)
+                        .text(plainCaption)
+                        .linkPreviewOptions(LinkPreviewOptions.builder().isDisabled(true).build())
+                        .build()
+                    
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(followUpMessage)
+                    }
+                }
+                
+                MediaType.VIDEO_NOTE -> {
+                    val sendVideoNote = SendVideoNote.builder()
+                        .chatId(chatId)
+                        .videoNote(InputFile(mediaItem.fileId))
+                        .apply {
+                            mediaItem.duration?.let { duration(it) }
+                        }
+                        .build()
+                    
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(sendVideoNote)
+                    }
+                    
+                    // Send caption separately (video notes don't support captions)
+                    val followUpMessage = SendMessage.builder()
+                        .chatId(chatId)
+                        .text(plainCaption)
+                        .linkPreviewOptions(LinkPreviewOptions.builder().isDisabled(true).build())
+                        .build()
+                    
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(followUpMessage)
+                    }
+                }
+                
+                MediaType.STICKER -> {
+                    val sendSticker = SendSticker.builder()
+                        .chatId(chatId)
+                        .sticker(InputFile(mediaItem.fileId))
+                        .build()
+                    
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(sendSticker)
+                    }
+                    
+                    // Send caption separately (stickers don't support captions)
+                    val followUpMessage = SendMessage.builder()
+                        .chatId(chatId)
+                        .text(plainCaption)
+                        .linkPreviewOptions(LinkPreviewOptions.builder().isDisabled(true).build())
+                        .build()
+                    
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(followUpMessage)
+                    }
                 }
             }
             
             plainFallback++
+            logger.debug { "✅ Plain single media sent successfully for user $chatId (${mediaItem.type})" }
             true
             
         } catch (e: Exception) {
@@ -587,34 +691,46 @@ class NotificationProcessor(
     
     /**
      * Build header text with clickable channel link
+     * FIXED: More robust MarkdownV2 escaping and fallback handling
      */
     private fun buildHeaderText(channelName: String, language: String, messageLink: String?): String {
-        return if (!messageLink.isNullOrBlank()) {
-            val linkDisplayText = if (channelName.startsWith("@")) {
-                channelName
+        return try {
+            if (!messageLink.isNullOrBlank()) {
+                val linkDisplayText = if (channelName.startsWith("@")) {
+                    channelName
+                } else {
+                    "@$channelName"
+                }
+                
+                // Create MarkdownV2 link with more robust escaping
+                val safeLinkText = linkDisplayText
+                    .replace("\\", "\\\\")
+                    .replace("_", "\\_")
+                    .replace("*", "\\*")
+                    .replace("`", "\\`")
+                    .replace("~", "\\~")
+                    .replace("[", "\\[")
+                    .replace("]", "\\]")
+                    .replace("(", "\\(")
+                    .replace(")", "\\)")
+                
+                val escapedUrl = TelegramMarkdownConverter.escapeUrlInLink(messageLink)
+                val markdownLink = "[$safeLinkText]($escapedUrl)"
+                
+                val rawTemplate = Localization.getMessage(language, "notification.job.match.header", "PLACEHOLDER")
+                val templateWithPlaceholder = rawTemplate.replace("PLACEHOLDER", "{0}")
+                val escapedTemplate = TelegramMarkdownConverter.escapeMarkdownV2(templateWithPlaceholder)
+                
+                escapedTemplate.replace("\\{0\\}", markdownLink).replace("{0}", markdownLink)
             } else {
-                "@$channelName"
+                val header = Localization.getMessage(language, "notification.job.match.header", channelName)
+                TelegramMarkdownConverter.escapeMarkdownV2(header)
             }
-            
-            // Create MarkdownV2 link
-            val safeLinkText = linkDisplayText
-                .replace("\\", "\\\\")
-                .replace("_", "\\_")
-                .replace("*", "\\*")
-                .replace("`", "\\`")
-                .replace("~", "\\~")
-            
-            val escapedUrl = TelegramMarkdownConverter.escapeUrlInLink(messageLink)
-            val markdownLink = "[$safeLinkText]($escapedUrl)"
-            
-            val rawTemplate = Localization.getMessage(language, "notification.job.match.header", "PLACEHOLDER")
-            val templateWithPlaceholder = rawTemplate.replace("PLACEHOLDER", "{0}")
-            val escapedTemplate = TelegramMarkdownConverter.escapeMarkdownV2(templateWithPlaceholder)
-            
-            escapedTemplate.replace("\\{0\\}", markdownLink).replace("{0}", markdownLink)
-        } else {
-            val header = Localization.getMessage(language, "notification.job.match.header", channelName)
-            TelegramMarkdownConverter.escapeMarkdownV2(header)
+        } catch (e: Exception) {
+            // Fallback to simple plain text if MarkdownV2 processing fails
+            logger.warn(e) { "Failed to build MarkdownV2 header, using plain text fallback" }
+            val simpleHeader = Localization.getMessage(language, "notification.job.match.header", channelName)
+            simpleHeader.replace(Regex("[*_`~\\[\\](){}#+\\-=|.!\\\\]"), "")
         }
     }
     
@@ -630,20 +746,23 @@ class NotificationProcessor(
     }
     
     /**
-     * Build plain caption (no markdown formatting)
+     * Build plain caption (no markdown formatting) 
+     * FIXED: More robust markdown removal and safer fallback
      */
     private fun buildPlainCaption(headerText: String, originalText: String): String {
-        // Remove markdown formatting for plain text version
-        val plainHeader = headerText
-            .replace(Regex("\\[[^\\]]*\\]\\([^\\)]*\\)"), "") // Remove links
-            .replace(Regex("\\\\(.)"), "$1") // Remove escape characters
-            .replace(Regex("[*_`~]"), "") // Remove formatting chars
+        // More comprehensive markdown removal
+        val cleanHeader = headerText
+            .replace(Regex("\\[[^\\]]*\\]\\([^\\)]*\\)"), "") // Remove [text](url) links completely
+            .replace(Regex("\\\\(.)"), "$1") // Remove escape characters like \*, \_, etc.
+            .replace(Regex("[*_`~|\\[\\](){}#+=!.-]"), "") // Remove ALL formatting chars
+            .replace(Regex("\\s+"), " ") // Normalize whitespace
+            .trim()
         
         return if (originalText.isNotBlank()) {
-            "$plainHeader\n\n$originalText"
+            "$cleanHeader\n\n$originalText"
         } else {
-            plainHeader
-        }
+            cleanHeader
+        }.take(1024) // Telegram caption limit
     }
     
     /**
