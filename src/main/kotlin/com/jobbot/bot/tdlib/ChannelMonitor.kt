@@ -311,14 +311,8 @@ class ChannelMonitor(
             
             val finalResult = result.toString()
             
-            // 🔧 FIXED: Consistent debug logging and validation
+            // 🔧 FIXED: Consistent debug logging - removed validation check
             logger.debug { "Generated MarkdownV2 (${finalResult.length} chars): $finalResult" }
-            
-            // Use converter's validation
-            if (TelegramMarkdownConverter.hasUnbalancedMarkup(finalResult)) {
-                logger.debug { "Generated markdown has unbalanced markup, returning escaped plain text" }
-                return TelegramMarkdownConverter.escapeMarkdownV2(formattedText.text)
-            }
             
             return finalResult
             
