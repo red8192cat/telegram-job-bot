@@ -246,8 +246,9 @@ class ChannelMonitor(
     }
     
     /**
-     * Process single message with media downloads
-     */
+    * Process single message with media downloads
+    * ENHANCED: Better handling of various message types including polls
+    */
     private suspend fun processMessageWithMedia(
         message: TdApi.Message,
         channelId: String,
@@ -261,13 +262,24 @@ class ChannelMonitor(
             logger.debug { "Downloading media attachments for message ${message.id}" }
             val mediaAttachments = mediaDownloader.downloadMessageMedia(message, client)
             
-            // Skip if no text and no media
-            if (plainText.isBlank() && mediaAttachments.isEmpty()) {
-                logger.debug { "Message has no text content and no media attachments, skipping" }
+            // ENHANCED: More intelligent content checking
+            val hasUsefulText = plainText.isNotBlank() && plainText.length >= 3 // At least 3 characters
+            val hasMedia = mediaAttachments.isNotEmpty()
+            
+            // Skip only if absolutely no useful content
+            if (!hasUsefulText && !hasMedia) {
+                logger.debug { "Message has no useful content (text: '${plainText.take(50)}', media: ${mediaAttachments.size}), skipping" }
                 return
             }
             
-            logger.debug { "Processing single message: text='${plainText.take(50)}${if (plainText.length > 50) "..." else ""}', media=${mediaAttachments.size}" }
+            // For media-only messages, generate searchable keywords
+            val finalPlainText = if (!hasUsefulText && hasMedia) {
+                generateMediaKeywords(mediaAttachments, message.content)
+            } else {
+                plainText
+            }
+            
+            logger.debug { "Processing message: text='${finalPlainText.take(50)}${if (finalPlainText.length > 50) "..." else ""}', media=${mediaAttachments.size}" }
             
             if (mediaAttachments.isNotEmpty()) {
                 logger.info { "Downloaded ${mediaAttachments.size} media attachments for message ${message.id}" }
@@ -289,29 +301,12 @@ class ChannelMonitor(
             
             val messageLink = generateMessageLink(channelDetails, message.id)
             
-            // Handle media-only messages
-            val finalPlainText = if (plainText.isBlank() && mediaAttachments.isNotEmpty()) {
-                // Generate generic text for keyword matching based on media type
-                val mediaType = mediaAttachments.first().type
-                when (mediaType) {
-                    MediaType.PHOTO -> "photo image picture"
-                    MediaType.VIDEO -> "video clip recording"
-                    MediaType.DOCUMENT -> "document file attachment"
-                    MediaType.AUDIO -> "audio sound music"
-                    MediaType.VOICE -> "voice message recording"
-                    MediaType.ANIMATION -> "gif animation video"
-                    else -> "media attachment file" // Fallback for any new types
-                }
-            } else {
-                plainText
-            }
-            
             val channelMessage = ChannelMessage(
                 channelId = channelId,
                 channelName = displayName,
                 messageId = message.id,
                 text = finalPlainText,
-                formattedText = if (plainText.isNotBlank()) formattedText else null,
+                formattedText = if (hasUsefulText) formattedText else null,
                 senderUsername = null,
                 messageLink = messageLink,
                 mediaAttachments = mediaAttachments
@@ -330,6 +325,71 @@ class ChannelMonitor(
             logger.error(e) { "Error processing single message with media" }
             ErrorTracker.logError("ERROR", "Single message processing error: ${e.message}", e)
         }
+    }
+
+    /**
+    * Generate searchable keywords for media-only messages
+    * This helps with job matching even when there's no text
+    */
+    private fun generateMediaKeywords(
+        mediaAttachments: List<MediaAttachment>,
+        messageContent: TdApi.MessageContent
+    ): String {
+        val keywords = mutableListOf<String>()
+        
+        // Add media type keywords
+        val mediaTypes = mediaAttachments.map { it.type }.distinct()
+        mediaTypes.forEach { type ->
+            when (type) {
+                MediaType.PHOTO -> keywords.addAll(listOf("photo", "image", "picture", "screenshot"))
+                MediaType.VIDEO -> keywords.addAll(listOf("video", "clip", "recording", "demo"))
+                MediaType.DOCUMENT -> keywords.addAll(listOf("document", "file", "attachment", "pdf"))
+                MediaType.AUDIO -> keywords.addAll(listOf("audio", "sound", "music", "recording"))
+                MediaType.VOICE -> keywords.addAll(listOf("voice", "message", "audio", "recording"))
+                MediaType.ANIMATION -> keywords.addAll(listOf("gif", "animation", "video", "clip"))
+            }
+        }
+        
+        // Add content-specific keywords
+        when (messageContent) {
+            is TdApi.MessagePoll -> {
+                keywords.addAll(listOf("poll", "vote", "survey", "question"))
+                // Add poll-specific terms that might be job-related
+                val question = messageContent.poll.question.text.lowercase()
+                if (question.contains("job") || question.contains("work") || question.contains("hire")) {
+                    keywords.addAll(listOf("job", "hiring", "employment", "work"))
+                }
+            }
+            is TdApi.MessageSticker -> {
+                keywords.addAll(listOf("sticker", "emoji", "reaction"))
+            }
+            is TdApi.MessageLocation -> {
+                keywords.addAll(listOf("location", "address", "place", "map"))
+            }
+            is TdApi.MessageVenue -> {
+                keywords.addAll(listOf("venue", "place", "location", "address"))
+            }
+            is TdApi.MessageContact -> {
+                keywords.addAll(listOf("contact", "phone", "person", "info"))
+            }
+        }
+        
+        // Add filename-based keywords (useful for job-related documents)
+        mediaAttachments.forEach { attachment ->
+            attachment.originalFileName?.let { filename ->
+                val nameParts = filename.lowercase()
+                    .replace(Regex("[^a-z0-9\\s]"), " ")
+                    .split("\\s+".toRegex())
+                    .filter { it.length > 2 } // Only words longer than 2 chars
+                
+                keywords.addAll(nameParts)
+            }
+        }
+        
+        val result = keywords.distinct().joinToString(" ")
+        logger.debug { "Generated media keywords: '$result'" }
+        
+        return result
     }
     
     /**
@@ -357,9 +417,9 @@ class ChannelMonitor(
     }
     
     /**
-     * Extract both plain text and formatted text from message content
-     * (existing method - unchanged)
-     */
+    * Extract both plain text and formatted text from message content
+    * ENHANCED: Now handles polls, stickers, and other message types for better job matching
+    */
     private fun extractMessageContent(content: TdApi.MessageContent): Pair<String, String> {
         return when (content) {
             is TdApi.MessageText -> {
@@ -368,44 +428,193 @@ class ChannelMonitor(
                 logger.debug { "Text message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
+            
             is TdApi.MessagePhoto -> {
                 val plainText = content.caption?.text ?: ""
                 val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
                 logger.debug { "Photo message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
+            
             is TdApi.MessageVideo -> {
                 val plainText = content.caption?.text ?: ""
                 val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
                 logger.debug { "Video message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
+            
             is TdApi.MessageDocument -> {
                 val plainText = content.caption?.text ?: ""
                 val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
                 logger.debug { "Document message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
+            
             is TdApi.MessageAudio -> {
                 val plainText = content.caption?.text ?: ""
                 val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
                 logger.debug { "Audio message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
+            
             is TdApi.MessageAnimation -> {
                 val plainText = content.caption?.text ?: ""
                 val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
                 logger.debug { "Animation message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
+            
             is TdApi.MessageVoiceNote -> {
                 val plainText = content.caption?.text ?: ""
                 val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
                 logger.debug { "Voice note message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
+            
+            // ADDED: Handle polls for job-related content
+            is TdApi.MessagePoll -> {
+                val poll = content.poll
+                val question = poll.question.text
+                val options = poll.options.joinToString(" ") { it.text.text }
+                val plainText = "$question $options"
+                val formattedText = "*${TelegramMarkdownConverter.escapeForFormatting(question)}*\n\n${TelegramMarkdownConverter.escapeMarkdownV2(options)}"
+                logger.debug { "Poll message - question: '${question.take(50)}', ${poll.options.size} options" }
+                Pair(plainText, formattedText)
+            }
+            
+            // ADDED: Handle stickers (some have associated text/emoji)
+            is TdApi.MessageSticker -> {
+                val sticker = content.sticker
+                val emoji = sticker.emoji
+                val stickerText = if (!emoji.isNullOrBlank()) {
+                    "sticker $emoji"
+                } else {
+                    "sticker"
+                }
+                logger.debug { "Sticker message - emoji: '$emoji'" }
+                Pair(stickerText, stickerText)
+            }
+            
+            // ADDED: Handle location messages (could be job-related)
+            is TdApi.MessageLocation -> {
+                val location = content.location
+                val locationText = "location ${location.latitude} ${location.longitude}"
+                logger.debug { "Location message" }
+                Pair(locationText, locationText)
+            }
+            
+            // ADDED: Handle venue messages (could be job-related)
+            is TdApi.MessageVenue -> {
+                val venue = content.venue
+                val venueText = "${venue.title} ${venue.address}"
+                logger.debug { "Venue message - title: '${venue.title}'" }
+                Pair(venueText, venueText)
+            }
+            
+            // ADDED: Handle contact messages
+            is TdApi.MessageContact -> {
+                val contact = content.contact
+                val contactText = "${contact.firstName} ${contact.lastName} ${contact.phoneNumber}"
+                logger.debug { "Contact message - name: '${contact.firstName} ${contact.lastName}'" }
+                Pair(contactText, contactText)
+            }
+            
+            // ADDED: Handle dice/game messages (usually not job-related, but worth logging)
+            is TdApi.MessageDice -> {
+                val emoji = content.emoji
+                val diceText = "dice $emoji"
+                logger.debug { "Dice message - emoji: '$emoji'" }
+                Pair(diceText, diceText)
+            }
+            
+            // ADDED: Handle game messages
+            is TdApi.MessageGame -> {
+                val game = content.game
+                val gameText = "${game.title} ${game.description}"
+                logger.debug { "Game message - title: '${game.title}'" }
+                Pair(gameText, gameText)
+            }
+            
+            // ADDED: Handle invoice messages (could be job-related)
+            is TdApi.MessageInvoice -> {
+                val invoice = content.invoice
+                val invoiceText = "${invoice.title} ${invoice.description}"
+                logger.debug { "Invoice message - title: '${invoice.title}'" }
+                Pair(invoiceText, invoiceText)
+            }
+            
+            // ADDED: Handle web page previews
+            is TdApi.MessageWebPage -> {
+                val webPage = content.webPage
+                val webPageText = "${webPage.siteName} ${webPage.title} ${webPage.description}"
+                logger.debug { "Web page message - title: '${webPage.title}'" }
+                Pair(webPageText, webPageText)
+            }
+            
+            // ADDED: Service messages that might contain useful info
+            is TdApi.MessageChatAddMembers -> {
+                val memberNames = content.memberUserIds.joinToString(" ") { "user$it" }
+                val serviceText = "new members joined $memberNames"
+                logger.debug { "Chat add members - ${content.memberUserIds.size} members" }
+                Pair(serviceText, serviceText)
+            }
+            
+            is TdApi.MessageChatJoinByLink -> {
+                val serviceText = "user joined via link"
+                logger.debug { "User joined by link" }
+                Pair(serviceText, serviceText)
+            }
+            
+            is TdApi.MessageChatDeleteMember -> {
+                val serviceText = "user left chat"
+                logger.debug { "User left chat" }
+                Pair(serviceText, serviceText)
+            }
+            
+            is TdApi.MessageChatChangeTitle -> {
+                val newTitle = content.title
+                val serviceText = "chat title changed to $newTitle"
+                logger.debug { "Chat title changed to: '$newTitle'" }
+                Pair(serviceText, serviceText)
+            }
+            
+            is TdApi.MessageChatChangePhoto -> {
+                val serviceText = "chat photo changed"
+                logger.debug { "Chat photo changed" }
+                Pair(serviceText, serviceText)
+            }
+            
+            is TdApi.MessageChatDeletePhoto -> {
+                val serviceText = "chat photo deleted"
+                logger.debug { "Chat photo deleted" }
+                Pair(serviceText, serviceText)
+            }
+            
+            is TdApi.MessageChannelChatCreate -> {
+                val channelTitle = content.title
+                val serviceText = "channel created $channelTitle"
+                logger.debug { "Channel created: '$channelTitle'" }
+                Pair(serviceText, serviceText)
+            }
+            
+            is TdApi.MessageSupergroupChatCreate -> {
+                val groupTitle = content.title
+                val serviceText = "supergroup created $groupTitle"
+                logger.debug { "Supergroup created: '$groupTitle'" }
+                Pair(serviceText, serviceText)
+            }
+            
+            // Handle other message types that might have text content
+            is TdApi.MessageAnimatedEmoji -> {
+                val emoji = content.emoji
+                val emojiText = "animated emoji $emoji"
+                logger.debug { "Animated emoji: '$emoji'" }
+                Pair(emojiText, emojiText)
+            }
+            
+            // For any unsupported types, return empty but log the type
             else -> {
-                logger.debug { "Unsupported message type: ${content.javaClass.simpleName}" }
+                logger.debug { "Unsupported message type: ${content.javaClass.simpleName} - extracting empty content" }
                 Pair("", "")
             }
         }
