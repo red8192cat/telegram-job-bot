@@ -385,7 +385,7 @@ class MediaDownloader {
     }
     
     /**
-     * COMPLETELY REWRITTEN: Handle completed download with robust Unicode filename handling
+     * COMPLETELY REWRITTEN: Handle completed download with Docker permissions fix
      */
     private fun handleCompletedDownload(
         file: TdApi.File,
@@ -418,64 +418,99 @@ class MediaDownloader {
             
             logger.debug { "TDLib reports file at: '$tdlibSourcePath' (verified size: $expectedSize bytes)" }
             
-            // NEW APPROACH: Always use size-based matching for Unicode files
+            // STRATEGY 1: Try direct access first (works when permissions are correct)
+            val directFile = File(tdlibSourcePath)
+            if (directFile.exists() && directFile.length() == expectedSize && directFile.length() > 0) {
+                try {
+                    // Test actual read access by trying to read first byte
+                    directFile.inputStream().use { stream ->
+                        stream.read() // This will throw if we can't actually read
+                    }
+                    logger.info { "✅ Direct file access successful: ${getSafeFilename(directFile)} (${directFile.length()} bytes)" }
+                    copyFileToTarget(directFile, targetPath, deferred)
+                    return
+                } catch (e: Exception) {
+                    logger.debug { "Direct file access failed (permission issue): ${e.message}" }
+                }
+            }
+            
+            // STRATEGY 2: Search directory with permission-aware filtering
             val parentDir = File(tdlibSourcePath).parentFile
             
             if (parentDir?.exists() == true) {
-                logger.debug { "Searching directory for file with exact size: $expectedSize bytes" }
+                logger.debug { "Searching directory for readable file with exact size: $expectedSize bytes" }
                 
-                // Look for files with the exact size and read permission
-                val candidates = parentDir.listFiles()?.filter { file ->
-                    file.isFile && 
-                    file.length() == expectedSize &&
-                    file.length() > 0 &&
-                    file.canRead()
-                } ?: emptyList()
+                // Get all files in directory and test them for actual readability
+                val allFiles = try {
+                    parentDir.listFiles()?.toList() ?: emptyList()
+                } catch (e: Exception) {
+                    logger.warn { "Cannot list directory contents: ${e.message}" }
+                    emptyList()
+                }
                 
-                logger.debug { "Found ${candidates.size} candidate files with correct size" }
+                logger.debug { "Directory contains ${allFiles.size} total files" }
+                
+                // Find candidates by size and actual readability
+                val candidates = allFiles.mapNotNull { candidateFile ->
+                    try {
+                        if (!candidateFile.isFile) return@mapNotNull null
+                        
+                        // Get actual file size
+                        val actualSize = candidateFile.length()
+                        
+                        // Test readability with actual stream access
+                        val isReadable = try {
+                            candidateFile.inputStream().use { stream ->
+                                stream.read() // Test actual read access
+                                true
+                            }
+                        } catch (e: Exception) {
+                            false
+                        }
+                        
+                        val ageSeconds = (System.currentTimeMillis() - candidateFile.lastModified()) / 1000
+                        val safeFileName = getSafeFilename(candidateFile)
+                        
+                        logger.debug { 
+                            "File: $safeFileName, size: $actualSize, readable: $isReadable, age: ${ageSeconds}s, " +
+                            "target_size: $expectedSize, match: ${actualSize == expectedSize}" 
+                        }
+                        
+                        if (actualSize == expectedSize && actualSize > 0 && isReadable) {
+                            CandidateFile(candidateFile, ageSeconds)
+                        } else null
+                        
+                    } catch (e: Exception) {
+                        logger.debug { "Error examining file ${candidateFile.name}: ${e.message}" }
+                        null
+                    }
+                }
+                
+                logger.debug { "Found ${candidates.size} readable candidate files with correct size" }
                 
                 if (candidates.isNotEmpty()) {
                     // Log all candidates for debugging
-                    candidates.forEachIndexed { index, candidateFile ->
-                        val safeFileName = getSafeFilename(candidateFile)
-                        val ageSeconds = (System.currentTimeMillis() - candidateFile.lastModified()) / 1000
-                        logger.debug { "Candidate $index: $safeFileName (${candidateFile.length()} bytes, age: ${ageSeconds}s)" }
+                    candidates.forEachIndexed { index, candidate ->
+                        val safeFileName = getSafeFilename(candidate.file)
+                        logger.debug { "Readable candidate $index: $safeFileName (${candidate.file.length()} bytes, age: ${candidate.ageSeconds}s)" }
                     }
                     
-                    // Strategy 1: Try direct path match first
-                    val directMatch = candidates.find { it.absolutePath == tdlibSourcePath }
-                    if (directMatch != null) {
-                        logger.info { "✅ Found file via direct path match: ${getSafeFilename(directMatch)}" }
-                        copyFileToTarget(directMatch, targetPath, deferred)
+                    // Prefer recently modified files (likely the one we just downloaded)
+                    val bestCandidate = candidates.minByOrNull { it.ageSeconds }
+                    if (bestCandidate != null) {
+                        logger.info { "✅ Found readable file: ${getSafeFilename(bestCandidate.file)} (age: ${bestCandidate.ageSeconds}s)" }
+                        copyFileToTarget(bestCandidate.file, targetPath, deferred)
                         return
                     }
-                    
-                    // Strategy 2: Use the most recently modified file (likely the one we just downloaded)
-                    val newestFile = candidates.maxByOrNull { it.lastModified() }
-                    if (newestFile != null) {
-                        val ageSeconds = (System.currentTimeMillis() - newestFile.lastModified()) / 1000
-                        if (ageSeconds < 30) { // File was modified in the last 30 seconds
-                            logger.info { "✅ Found file via newest modification time: ${getSafeFilename(newestFile)} (age: ${ageSeconds}s)" }
-                            copyFileToTarget(newestFile, targetPath, deferred)
-                            return
-                        }
-                    }
-                    
-                    // Strategy 3: Use any file with the correct size (last resort)
-                    val fallbackFile = candidates.first()
-                    logger.warn { "⚠️ Using size-match fallback: ${getSafeFilename(fallbackFile)} (${fallbackFile.length()} bytes)" }
-                    copyFileToTarget(fallbackFile, targetPath, deferred)
-                    return
-                    
                 } else {
-                    logger.warn { "No files found with correct size $expectedSize in directory" }
-                    logDirectoryContents(parentDir, expectedSize)
+                    logger.warn { "No readable files found with correct size $expectedSize" }
+                    logDirectoryContentsDetailed(allFiles, expectedSize)
                 }
             } else {
                 logger.warn { "Parent directory does not exist: ${parentDir?.absolutePath}" }
             }
             
-            logger.warn { "Could not locate downloaded file - this indicates a TDLib issue" }
+            logger.warn { "Could not locate readable downloaded file - this indicates a Docker permission or TDLib issue" }
             deferred.complete(null)
             
         } catch (e: Exception) {
@@ -483,6 +518,14 @@ class MediaDownloader {
             deferred.complete(null)
         }
     }
+    
+    /**
+     * Data class for candidate files with timing info
+     */
+    private data class CandidateFile(
+        val file: File,
+        val ageSeconds: Long
+    )
     
     /**
      * Get filename safely for logging (handles encoding errors gracefully)
@@ -506,30 +549,53 @@ class MediaDownloader {
     }
     
     /**
-     * Log directory contents with proper error handling for Unicode filenames
+     * Enhanced directory logging with actual file access testing
      */
-    private fun logDirectoryContents(directory: File, expectedSize: Long) {
+    private fun logDirectoryContentsDetailed(allFiles: List<File>, expectedSize: Long) {
         try {
-            val allFiles = directory.listFiles()
-            logger.debug { "Directory contains ${allFiles?.size ?: 0} files:" }
+            logger.debug { "Directory detailed analysis (${allFiles.size} files):" }
             
-            allFiles?.forEachIndexed { index, file ->
-                val age = (System.currentTimeMillis() - file.lastModified()) / 1000
-                val sizeMatch = if (file.length() == expectedSize) "✅" else "❌"
-                val safeFileName = getSafeFilename(file)
-                
-                logger.debug { 
-                    "  [$index] $safeFileName: ${file.length()} bytes (age: ${age}s) $sizeMatch"
+            allFiles.forEachIndexed { index, file ->
+                try {
+                    val actualSize = file.length()
+                    val age = (System.currentTimeMillis() - file.lastModified()) / 1000
+                    val sizeMatch = if (actualSize == expectedSize) "✅" else "❌"
+                    val safeFileName = getSafeFilename(file)
+                    
+                    // Test actual readability
+                    val readabilityTest = try {
+                        file.inputStream().use { stream ->
+                            val firstByte = stream.read()
+                            if (firstByte == -1) "EMPTY" else "READABLE"
+                        }
+                    } catch (e: Exception) {
+                        "PERMISSION_DENIED: ${e.javaClass.simpleName}"
+                    }
+                    
+                    logger.debug { 
+                        "  [$index] $safeFileName: ${actualSize} bytes (age: ${age}s) $sizeMatch - $readabilityTest"
+                    }
+                    
+                    // Additional permission details for files with correct size
+                    if (actualSize == expectedSize) {
+                        logger.debug {
+                            "    Permissions: readable=${file.canRead()}, writable=${file.canWrite()}, " +
+                            "exists=${file.exists()}, isFile=${file.isFile()}"
+                        }
+                    }
+                    
+                } catch (e: Exception) {
+                    logger.debug { "  [$index] <error examining file>: ${e.message}" }
                 }
             }
             
         } catch (e: Exception) {
-            logger.error(e) { "Error logging directory contents" }
+            logger.error(e) { "Error in detailed directory logging" }
         }
     }
     
     /**
-     * Copy file to target with verification
+     * Copy file to target with enhanced verification and Docker permission handling
      */
     private fun copyFileToTarget(
         sourceFile: File,
@@ -542,21 +608,57 @@ class MediaDownloader {
             // Ensure target directory exists
             targetFile.parentFile?.mkdirs()
             
-            // Copy the file
-            sourceFile.copyTo(targetFile, overwrite = true)
+            // Enhanced copy with stream verification
+            logger.debug { "Copying ${sourceFile.absolutePath} to $targetPath" }
             
-            // Verify copy
-            if (!targetFile.exists() || targetFile.length() != sourceFile.length() || targetFile.length() == 0L) {
-                logger.warn { "File copy verification failed: exists=${targetFile.exists()}, size=${targetFile.length()}/${sourceFile.length()}" }
+            // Use buffered streams for better performance and verification
+            sourceFile.inputStream().buffered().use { input ->
+                targetFile.outputStream().buffered().use { output ->
+                    val bytesCopied = input.copyTo(output)
+                    logger.debug { "Copied $bytesCopied bytes to target" }
+                }
+            }
+            
+            // Verify copy with actual file content check
+            if (!targetFile.exists()) {
+                logger.warn { "Target file does not exist after copy" }
                 deferred.complete(null)
                 return
             }
             
-            logger.info { "Successfully copied file to: $targetPath (${targetFile.length()} bytes)" }
+            if (targetFile.length() != sourceFile.length()) {
+                logger.warn { "Size mismatch after copy: target=${targetFile.length()}, source=${sourceFile.length()}" }
+                deferred.complete(null)
+                return
+            }
+            
+            if (targetFile.length() == 0L) {
+                logger.warn { "Target file is 0 bytes after copy" }
+                deferred.complete(null)
+                return
+            }
+            
+            // Final readability test on target file
+            try {
+                targetFile.inputStream().use { stream ->
+                    val testByte = stream.read()
+                    if (testByte == -1) {
+                        logger.warn { "Target file appears empty despite having size ${targetFile.length()}" }
+                        deferred.complete(null)
+                        return
+                    }
+                }
+            } catch (e: Exception) {
+                logger.warn { "Cannot read target file after copy: ${e.message}" }
+                deferred.complete(null)
+                return
+            }
+            
+            logger.info { "Successfully copied and verified file: $targetPath (${targetFile.length()} bytes)" }
             deferred.complete(targetPath)
             
         } catch (e: Exception) {
-            logger.error(e) { "Error copying file to target" }
+            logger.error(e) { "Error copying file to target: ${e.message}" }
             deferred.complete(null)
         }
     }
