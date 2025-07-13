@@ -444,6 +444,7 @@ class MediaDownloader {
     /**
      * Handle completed download with robust error checking
      * FIXED: Check if source file actually exists before copying
+     * FIXED: Handle Unicode/encoding issues with TDLib source paths
      */
     private fun handleCompletedDownload(
         file: TdApi.File,
@@ -459,22 +460,108 @@ class MediaDownloader {
                 return
             }
             
+            logger.debug { "Attempting to copy from TDLib path: '$sourcePath' to '$targetPath'" }
+            
             val sourceFile = File(sourcePath)
             
             if (!sourceFile.exists()) {
                 logger.warn { "Download completed but source file doesn't exist: $sourcePath" }
+                
+                // ADDITIONAL: Try to find the file with different encoding or similar name
+                val parentDir = sourceFile.parentFile
+                if (parentDir?.exists() == true) {
+                    logger.debug { "Searching for alternative files in: ${parentDir.absolutePath}" }
+                    
+                    val alternativeFile = findAlternativeFile(parentDir, sourceFile.name)
+                    if (alternativeFile != null) {
+                        logger.info { "Found alternative file: ${alternativeFile.absolutePath}" }
+                        return handleFileFound(alternativeFile, targetPath, deferred)
+                    }
+                }
+                
                 deferred.complete(null)
                 return
             }
             
+            handleFileFound(sourceFile, targetPath, deferred)
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to handle completed download" }
+            deferred.complete(null)
+        }
+    }
+    
+    /**
+     * Try to find a file with similar name when exact filename doesn't work
+     * This helps with Unicode/encoding issues
+     */
+    private fun findAlternativeFile(parentDir: File, originalName: String): File? {
+        try {
+            val files = parentDir.listFiles() ?: return null
+            
+            // First, try to find files with similar size and timestamp (recently modified)
+            val recentFiles = files.filter { 
+                it.isFile && 
+                it.lastModified() > System.currentTimeMillis() - 60000 && // Modified in last minute
+                it.length() > 0
+            }.sortedByDescending { it.lastModified() }
+            
+            if (recentFiles.isNotEmpty()) {
+                logger.debug { "Found ${recentFiles.size} recent files, using most recent: ${recentFiles.first().name}" }
+                return recentFiles.first()
+            }
+            
+            // Second, try exact name matching (case-insensitive)
+            val exactMatch = files.find { 
+                it.isFile && 
+                it.name.equals(originalName, ignoreCase = true)
+            }
+            if (exactMatch != null) {
+                logger.debug { "Found exact case-insensitive match: ${exactMatch.name}" }
+                return exactMatch
+            }
+            
+            // Third, try partial name matching
+            val baseName = originalName.substringBeforeLast('.')
+            val extension = if (originalName.contains('.')) originalName.substringAfterLast('.') else ""
+            
+            val partialMatch = files.find { file ->
+                file.isFile && 
+                (file.name.contains(baseName, ignoreCase = true) || 
+                 (extension.isNotEmpty() && file.name.endsWith(".$extension", ignoreCase = true)))
+            }
+            
+            if (partialMatch != null) {
+                logger.debug { "Found partial match: ${partialMatch.name}" }
+                return partialMatch
+            }
+            
+            logger.debug { "No alternative file found among ${files.size} files" }
+            return null
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Error searching for alternative file" }
+            return null
+        }
+    }
+    
+    /**
+     * Handle copying a found file to the target location
+     */
+    private fun handleFileFound(
+        sourceFile: File,
+        targetPath: String,
+        deferred: CompletableDeferred<String?>
+    ) {
+        try {
             if (!sourceFile.canRead()) {
-                logger.warn { "Download completed but source file is not readable: $sourcePath" }
+                logger.warn { "Source file is not readable: ${sourceFile.absolutePath}" }
                 deferred.complete(null)
                 return
             }
             
             if (sourceFile.length() == 0L) {
-                logger.warn { "Download completed but source file is empty: $sourcePath" }
+                logger.warn { "Source file is empty: ${sourceFile.absolutePath}" }
                 deferred.complete(null)
                 return
             }
@@ -494,7 +581,7 @@ class MediaDownloader {
             deferred.complete(targetPath)
             
         } catch (e: Exception) {
-            logger.error(e) { "Failed to handle completed download" }
+            logger.error(e) { "Failed to copy file: ${sourceFile.absolutePath} -> $targetPath" }
             deferred.complete(null)
         }
     }
