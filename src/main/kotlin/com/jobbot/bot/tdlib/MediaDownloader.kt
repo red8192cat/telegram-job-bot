@@ -303,6 +303,7 @@ class MediaDownloader {
                 when (result) {
                     is TdApi.File -> {
                         logger.debug { "Download response: completed=${result.local.isDownloadingCompleted}, size=${result.size}, local_size=${result.local.downloadedSize}" }
+                        logger.debug { "Download paths: remote=${result.remote.id}, local=${result.local.path}" }
                         
                         if (result.local.isDownloadingCompleted && result.local.downloadedSize == result.size) {
                             handleCompletedDownload(result, targetPath, deferred)
@@ -417,6 +418,41 @@ class MediaDownloader {
             
             logger.debug { "TDLib reports file at: '$tdlibSourcePath' (verified size: $expectedSize bytes)" }
             
+            // ENHANCED: First try to access the TDLib file directly with retry logic
+            val tdlibFile = File(tdlibSourcePath)
+            
+            // Try multiple times to access the file (filesystem sync issue)
+            var fileAccessAttempts = 0
+            var actualFile: File? = null
+            
+            while (fileAccessAttempts < 5 && actualFile == null) {
+                fileAccessAttempts++
+                
+                if (tdlibFile.exists()) {
+                    val fileSize = tdlibFile.length()
+                    logger.debug { "TDLib file attempt $fileAccessAttempts: exists=${tdlibFile.exists()}, size=$fileSize/$expectedSize, readable=${tdlibFile.canRead()}" }
+                    
+                    if (fileSize == expectedSize && fileSize > 0 && tdlibFile.canRead()) {
+                        actualFile = tdlibFile
+                        logger.info { "✅ TDLib file accessible directly: ${getSafeFilename(tdlibFile)} (${tdlibFile.length()} bytes)" }
+                        break
+                    } else if (fileSize == 0L) {
+                        logger.debug { "File exists but size is 0, waiting for filesystem sync..." }
+                        Thread.sleep(200) // Wait 200ms for filesystem sync
+                    }
+                } else {
+                    logger.debug { "TDLib file doesn't exist yet, waiting..." }
+                    Thread.sleep(200)
+                }
+            }
+            
+            if (actualFile != null) {
+                copyFileToTarget(actualFile, targetPath, deferred)
+                return
+            } else {
+                logger.warn { "TDLib file not accessible after $fileAccessAttempts attempts - trying directory search" }
+            }
+            
             // Extract expected filename from TDLib path
             val expectedFilename = File(tdlibSourcePath).name
             logger.debug { "Expected filename from TDLib: '$expectedFilename'" }
@@ -470,15 +506,50 @@ class MediaDownloader {
             (now - file.lastModified()) < 300000  // Within last 5 minutes
         }
         
-        if (candidates.isEmpty()) {
-            logger.debug { "No candidates found with size $expectedSize in last 5 minutes" }
+        // ENHANCED: Also try to find the file regardless of timestamp if no recent candidates
+        val allSizeMatches = if (candidates.isEmpty()) {
+            logger.debug { "No recent candidates, expanding search to all files with correct size" }
+            allFiles.filter { file ->
+                file.isFile && 
+                file.length() > 0 &&  // Must have content
+                file.canRead()
+            }.also { allCandidates ->
+                // Check each file individually for size (filesystem sync issue)
+                allCandidates.forEach { file ->
+                    val fileSize = file.length()
+                    logger.debug { "Checking file: ${getSafeFilename(file)}, reported size: $fileSize, expected: $expectedSize" }
+                    
+                    // Try to refresh file size multiple times
+                    if (fileSize != expectedSize) {
+                        Thread.sleep(100)
+                        val refreshedSize = file.length()
+                        logger.debug { "Refreshed size for ${getSafeFilename(file)}: $refreshedSize" }
+                    }
+                }
+            }.filter { file ->
+                file.length() == expectedSize
+            }
+        } else {
+            candidates
+        }
+        
+        if (allSizeMatches.isEmpty()) {
+            logger.debug { "No candidates found with size $expectedSize" }
+            
+            // ENHANCED: Try to find the actual TDLib file directly
+            val tdlibFile = File(directory, expectedFilename)
+            if (tdlibFile.exists() && tdlibFile.length() == expectedSize && tdlibFile.length() > 0) {
+                logger.info { "Found TDLib file directly: ${getSafeFilename(tdlibFile)} (${tdlibFile.length()} bytes)" }
+                return tdlibFile
+            }
+            
             return null
         }
         
-        logger.debug { "Found ${candidates.size} size-matching candidates, trying filename matching..." }
+        logger.debug { "Found ${allSizeMatches.size} size-matching files, trying filename matching..." }
         
         // Strategy 1: Direct filename match (handles ASCII and properly encoded UTF-8)
-        candidates.forEach { file ->
+        allSizeMatches.forEach { file ->
             if (file.name == expectedFilename) {
                 logger.debug { "✅ Direct filename match: ${getSafeFilename(file)}" }
                 return file
@@ -487,7 +558,7 @@ class MediaDownloader {
         
         // Strategy 2: Normalized filename comparison (handles different Unicode normalizations)
         val normalizedExpected = normalizeFilename(expectedFilename)
-        candidates.forEach { file ->
+        allSizeMatches.forEach { file ->
             val normalizedActual = normalizeFilename(file.name)
             if (normalizedActual == normalizedExpected) {
                 logger.debug { "✅ Normalized filename match: ${getSafeFilename(file)}" }
@@ -497,7 +568,7 @@ class MediaDownloader {
         
         // Strategy 3: UTF-8 byte-level comparison
         val expectedBytes = expectedFilename.toByteArray(StandardCharsets.UTF_8)
-        candidates.forEach { file ->
+        allSizeMatches.forEach { file ->
             try {
                 val actualBytes = file.name.toByteArray(StandardCharsets.UTF_8)
                 if (actualBytes.contentEquals(expectedBytes)) {
@@ -510,7 +581,7 @@ class MediaDownloader {
         }
         
         // Strategy 4: Try different charset interpretations
-        candidates.forEach { file ->
+        allSizeMatches.forEach { file ->
             if (compareWithCharsetVariants(file.name, expectedFilename)) {
                 logger.debug { "✅ Charset variant match: ${getSafeFilename(file)}" }
                 return file
@@ -521,7 +592,7 @@ class MediaDownloader {
         // Extract file extension and try to match by size + extension + recency
         val expectedExtension = getFileExtension(expectedFilename)
         if (expectedExtension != null) {
-            val extensionMatches = candidates.filter { file ->
+            val extensionMatches = allSizeMatches.filter { file ->
                 getFileExtension(file.name) == expectedExtension
             }.sortedByDescending { it.lastModified() }
             
@@ -532,7 +603,7 @@ class MediaDownloader {
         }
         
         // Strategy 6: Last resort - most recent file with correct size
-        val mostRecent = candidates.maxByOrNull { it.lastModified() }
+        val mostRecent = allSizeMatches.maxByOrNull { it.lastModified() }
         if (mostRecent != null) {
             logger.warn { "⚠️ Using most recent size match as fallback: ${getSafeFilename(mostRecent)}" }
             return mostRecent
