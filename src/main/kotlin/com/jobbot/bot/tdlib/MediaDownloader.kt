@@ -281,7 +281,7 @@ class MediaDownloader {
     }
     
     /**
-     * FOCUSED FIX: Download file with proper Unicode path handling
+     * FOCUSED FIX: Download file with proper verification and retry logic
      */
     private suspend fun downloadFile(
         client: Client, 
@@ -290,21 +290,22 @@ class MediaDownloader {
     ): String? = withContext(Dispatchers.IO) {
         
         try {
-            // Use simple ASCII filename to avoid Unicode issues
             val safeFileName = generateSafeFilename(fileName)
             val targetPath = File(TMP_DIR, safeFileName).absolutePath
             val deferred = CompletableDeferred<String?>()
             
             logger.debug { "Starting download: fileId=$fileId, targetPath=$targetPath" }
             
-            // Start the download
-            client.send(TdApi.DownloadFile(fileId, 1, 0, 0, false)) { result ->
+            // ENHANCED: Force download with higher priority and offset 0
+            client.send(TdApi.DownloadFile(fileId, 32, 0, 0, true)) { result ->
                 when (result) {
                     is TdApi.File -> {
-                        if (result.local.isDownloadingCompleted) {
+                        logger.debug { "Download response: completed=${result.local.isDownloadingCompleted}, size=${result.size}, local_size=${result.local.downloadedSize}" }
+                        
+                        if (result.local.isDownloadingCompleted && result.local.downloadedSize == result.size) {
                             handleCompletedDownload(result, targetPath, deferred)
                         } else {
-                            logger.debug { "Download started for fileId=$fileId, polling..." }
+                            logger.debug { "Download started for fileId=$fileId, polling... (progress: ${result.local.downloadedSize}/${result.size})" }
                         }
                     }
                     is TdApi.Error -> {
@@ -314,9 +315,11 @@ class MediaDownloader {
                 }
             }
             
-            // Poll for completion
+            // ENHANCED: More aggressive polling with progress tracking
             val pollJob = launch {
                 var pollCount = 0
+                var lastProgress = 0L
+                var stuckCount = 0
                 
                 while (isActive && !deferred.isCompleted && pollCount < MAX_POLL_ATTEMPTS) {
                     delay(DOWNLOAD_POLL_INTERVAL_MS)
@@ -325,8 +328,25 @@ class MediaDownloader {
                     client.send(TdApi.GetFile(fileId)) { fileResult ->
                         when (fileResult) {
                             is TdApi.File -> {
-                                if (fileResult.local.isDownloadingCompleted) {
+                                val progress = fileResult.local.downloadedSize
+                                val total = fileResult.size
+                                
+                                logger.debug { "Poll $pollCount: Progress $progress/$total bytes (${(progress * 100 / total.coerceAtLeast(1))}%)" }
+                                
+                                if (fileResult.local.isDownloadingCompleted && progress == total && total > 0) {
+                                    logger.debug { "Download completed successfully: $progress bytes" }
                                     handleCompletedDownload(fileResult, targetPath, deferred)
+                                } else if (progress == lastProgress) {
+                                    stuckCount++
+                                    if (stuckCount > 10) { // 5 seconds without progress
+                                        logger.warn { "Download appears stuck at $progress bytes, retrying..." }
+                                        // Retry the download
+                                        client.send(TdApi.DownloadFile(fileId, 32, 0, 0, true)) { }
+                                        stuckCount = 0
+                                    }
+                                } else {
+                                    stuckCount = 0
+                                    lastProgress = progress
                                 }
                             }
                             is TdApi.Error -> {
@@ -338,7 +358,7 @@ class MediaDownloader {
                 }
                 
                 if (pollCount >= MAX_POLL_ATTEMPTS && !deferred.isCompleted) {
-                    logger.warn { "Download timeout for fileId=$fileId" }
+                    logger.warn { "Download timeout for fileId=$fileId after $pollCount polls" }
                     deferred.complete(null)
                 }
             }
@@ -362,7 +382,7 @@ class MediaDownloader {
     }
     
     /**
-     * FOCUSED FIX: Handle the Unicode path issue with file size verification
+     * FOCUSED FIX: Handle completed download with strict verification
      */
     private fun handleCompletedDownload(
         file: TdApi.File,
@@ -372,6 +392,7 @@ class MediaDownloader {
         try {
             val tdlibSourcePath = file.local.path
             val expectedSize = file.size.toLong()
+            val downloadedSize = file.local.downloadedSize.toLong()
             
             if (tdlibSourcePath.isNullOrBlank()) {
                 logger.warn { "TDLib source path is empty" }
@@ -379,7 +400,20 @@ class MediaDownloader {
                 return
             }
             
-            logger.debug { "TDLib reports file at: '$tdlibSourcePath' (expected size: $expectedSize bytes)" }
+            // STRICT VERIFICATION: Must have downloaded the full file
+            if (downloadedSize != expectedSize) {
+                logger.warn { "Download incomplete: downloaded $downloadedSize/$expectedSize bytes" }
+                deferred.complete(null)
+                return
+            }
+            
+            if (expectedSize == 0L) {
+                logger.warn { "File has 0 bytes - invalid download" }
+                deferred.complete(null)
+                return
+            }
+            
+            logger.debug { "TDLib reports file at: '$tdlibSourcePath' (verified size: $expectedSize bytes)" }
             
             val parentDir = File(tdlibSourcePath).parentFile
             if (parentDir?.exists() != true) {
@@ -390,12 +424,12 @@ class MediaDownloader {
             
             logger.debug { "Listing files in directory: ${parentDir.absolutePath}" }
             
-            // IMPROVED: Find file that matches the expected size AND is recent
+            // Find file that matches the expected size AND is recent AND is not empty
             val now = System.currentTimeMillis()
             val candidateFiles = parentDir.listFiles()
                 ?.filter { 
                     it.isFile && 
-                    it.length() > 0 && 
+                    it.length() > 0 &&  // MUST have content
                     it.canRead() &&
                     it.length() == expectedSize &&  // EXACT size match
                     (now - it.lastModified()) < 300000  // Modified within last 5 minutes
@@ -406,33 +440,64 @@ class MediaDownloader {
                 logger.warn { "No files found matching size $expectedSize in directory: ${parentDir.absolutePath}" }
                 
                 // Debug: show what files are actually there
-                parentDir.listFiles()?.forEach { file ->
-                    logger.debug { "  Found: ${file.name} (${file.length()} bytes, age: ${(now - file.lastModified()) / 1000}s)" }
+                val allFiles = parentDir.listFiles()
+                logger.debug { "Directory contains ${allFiles?.size ?: 0} files:" }
+                allFiles?.forEach { file ->
+                    val age = (now - file.lastModified()) / 1000
+                    logger.debug { "  ${file.name}: ${file.length()} bytes (age: ${age}s)" }
                 }
                 
-                deferred.complete(null)
-                return
+                // FALLBACK: Try to find ANY file with the correct size (ignore timestamp)
+                val sizeMatcher = allFiles?.find { 
+                    it.isFile && it.length() == expectedSize && it.length() > 0 && it.canRead()
+                }
+                
+                if (sizeMatcher != null) {
+                    logger.info { "Found size-matching file ignoring timestamp: ${sizeMatcher.name}" }
+                    copyFileToTarget(sizeMatcher, targetPath, deferred)
+                    return
+                } else {
+                    logger.warn { "No files with correct size $expectedSize found at all" }
+                    deferred.complete(null)
+                    return
+                }
             }
             
             val actualFile = candidateFiles.first()
-            logger.debug { "Found matching file: ${actualFile.name} (${actualFile.length()} bytes, modified ${(now - actualFile.lastModified()) / 1000}s ago)" }
+            logger.info { "Found matching file: ${actualFile.name} (${actualFile.length()} bytes)" }
             
-            // Copy to our target location
+            copyFileToTarget(actualFile, targetPath, deferred)
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error handling completed download" }
+            deferred.complete(null)
+        }
+    }
+    
+    /**
+     * Copy file to target with verification
+     */
+    private fun copyFileToTarget(
+        sourceFile: File,
+        targetPath: String,
+        deferred: CompletableDeferred<String?>
+    ) {
+        try {
             val targetFile = File(targetPath)
-            actualFile.copyTo(targetFile, overwrite = true)
+            sourceFile.copyTo(targetFile, overwrite = true)
             
             // Verify copy
-            if (!targetFile.exists() || targetFile.length() != actualFile.length()) {
-                logger.warn { "File copy verification failed: exists=${targetFile.exists()}, size=${targetFile.length()}/${actualFile.length()}" }
+            if (!targetFile.exists() || targetFile.length() != sourceFile.length() || targetFile.length() == 0L) {
+                logger.warn { "File copy verification failed: exists=${targetFile.exists()}, size=${targetFile.length()}/${sourceFile.length()}" }
                 deferred.complete(null)
                 return
             }
             
-            logger.debug { "Successfully copied file to: $targetPath (${targetFile.length()} bytes)" }
+            logger.info { "Successfully copied file to: $targetPath (${targetFile.length()} bytes)" }
             deferred.complete(targetPath)
             
         } catch (e: Exception) {
-            logger.error(e) { "Error handling completed download" }
+            logger.error(e) { "Error copying file to target" }
             deferred.complete(null)
         }
     }
