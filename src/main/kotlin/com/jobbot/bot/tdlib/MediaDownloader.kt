@@ -8,14 +8,12 @@ import kotlinx.coroutines.*
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 import java.io.File
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
+import java.nio.charset.StandardCharsets
 import java.util.*
 
 /**
  * Downloads media attachments from TDLib messages
- * FIXED: Comprehensive Unicode filename handling for Cyrillic and other languages
+ * FOCUSED FIX: Handle Unicode filename encoding mismatch between TDLib and filesystem
  */
 class MediaDownloader {
     private val logger = getLogger("MediaDownloader")
@@ -28,76 +26,6 @@ class MediaDownloader {
         private const val TMP_DIR = "/tmp/jobbot_media"
     }
     
-    /**
-     * ENHANCED: Unicode-safe filename sanitization with better Cyrillic support
-     */
-    private fun sanitizeFilename(originalName: String): String {
-        try {
-            var sanitized = originalName
-            
-            // 1. Handle Unicode normalization first
-            sanitized = java.text.Normalizer.normalize(sanitized, java.text.Normalizer.Form.NFC)
-            
-            // 2. Comprehensive Cyrillic transliteration
-            sanitized = sanitized.replace(Regex("[а-яё]", RegexOption.IGNORE_CASE)) { match ->
-                when (match.value.lowercase()) {
-                    "а" -> "a"; "б" -> "b"; "в" -> "v"; "г" -> "g"; "д" -> "d"
-                    "е" -> "e"; "ё" -> "yo"; "ж" -> "zh"; "з" -> "z"; "и" -> "i"
-                    "й" -> "y"; "к" -> "k"; "л" -> "l"; "м" -> "m"; "н" -> "n"
-                    "о" -> "o"; "п" -> "p"; "р" -> "r"; "с" -> "s"; "т" -> "t"
-                    "у" -> "u"; "ф" -> "f"; "х" -> "h"; "ц" -> "ts"; "ч" -> "ch"
-                    "ш" -> "sh"; "щ" -> "sch"; "ъ" -> ""; "ы" -> "y"; "ь" -> ""
-                    "э" -> "e"; "ю" -> "yu"; "я" -> "ya"
-                    else -> match.value.lowercase()
-                }
-            }
-            
-            // 3. Replace multiple spaces with single underscore
-            sanitized = sanitized.replace(Regex("\\s+"), "_")
-            
-            // 4. Remove any remaining non-ASCII characters
-            sanitized = sanitized.replace(Regex("[^\\x00-\\x7F]"), "_")
-            
-            // 5. Replace problematic filesystem characters
-            sanitized = sanitized.replace(Regex("[<>:\"/\\\\|?*]"), "_")
-            
-            // 6. Remove control characters
-            sanitized = sanitized.replace(Regex("[\\x00-\\x1F\\x7F]"), "")
-            
-            // 7. Replace multiple underscores with single
-            sanitized = sanitized.replace(Regex("_+"), "_")
-            
-            // 8. Remove leading/trailing underscores and dots
-            sanitized = sanitized.trim('_', '.')
-            
-            // 9. Ensure filename is not empty and not too long
-            if (sanitized.isBlank()) {
-                sanitized = "media_file"
-            }
-            
-            // 10. Limit length to avoid filesystem issues
-            if (sanitized.length > 100) {
-                val extension = if (sanitized.contains('.')) {
-                    "." + sanitized.substringAfterLast('.')
-                } else ""
-                val nameWithoutExt = sanitized.substringBeforeLast('.')
-                sanitized = nameWithoutExt.take(100 - extension.length) + extension
-            }
-            
-            // 11. Add timestamp to make unique if still problematic
-            if (sanitized.length < 3) {
-                sanitized = "media_${System.currentTimeMillis()}"
-            }
-            
-            logger.debug { "Filename sanitized: '$originalName' -> '$sanitized'" }
-            return sanitized
-            
-        } catch (e: Exception) {
-            logger.warn(e) { "Error sanitizing filename '$originalName', using fallback" }
-            return "media_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}"
-        }
-    }
-    
     init {
         // Ensure temp directory exists
         File(TMP_DIR).mkdirs()
@@ -105,7 +33,6 @@ class MediaDownloader {
     
     /**
      * Download all media attachments from a TDLib message
-     * Returns list of successfully downloaded attachments
      */
     suspend fun downloadMessageMedia(
         message: TdApi.Message, 
@@ -121,6 +48,13 @@ class MediaDownloader {
         
         try {
             when (val content = message.content) {
+                is TdApi.MessageAudio -> {
+                    logger.debug { "Processing audio message" }
+                    downloadAudio(content, client, content.caption?.text)?.let { 
+                        attachments.add(it) 
+                    }
+                }
+                
                 is TdApi.MessagePhoto -> {
                     logger.debug { "Processing photo message" }
                     downloadPhoto(content, client, content.caption?.text)?.let { 
@@ -138,13 +72,6 @@ class MediaDownloader {
                 is TdApi.MessageDocument -> {
                     logger.debug { "Processing document message" }
                     downloadDocument(content, client, content.caption?.text)?.let { 
-                        attachments.add(it) 
-                    }
-                }
-                
-                is TdApi.MessageAudio -> {
-                    logger.debug { "Processing audio message" }
-                    downloadAudio(content, client, content.caption?.text)?.let { 
                         attachments.add(it) 
                     }
                 }
@@ -178,30 +105,56 @@ class MediaDownloader {
         attachments
     }
     
+    private suspend fun downloadAudio(
+        content: TdApi.MessageAudio, 
+        client: Client,
+        caption: String?
+    ): MediaAttachment? {
+        val audio = content.audio
+        
+        if (audio.audio.size > MAX_FILE_SIZE) {
+            logger.debug { "Audio too large: ${audio.audio.size / 1024 / 1024}MB (limit: ${MAX_FILE_SIZE / 1024 / 1024}MB)" }
+            return null
+        }
+        
+        val originalFileName = audio.fileName.ifBlank { "audio_${UUID.randomUUID()}.mp3" }
+        val localPath = downloadFile(client, audio.audio.id, originalFileName)
+        
+        return if (localPath != null) {
+            MediaAttachment(
+                type = MediaType.AUDIO,
+                filePath = localPath,
+                originalFileName = originalFileName,
+                fileSize = audio.audio.size.toLong(),
+                mimeType = audio.mimeType,
+                caption = caption,
+                duration = audio.duration
+            )
+        } else null
+    }
+    
     private suspend fun downloadPhoto(
         content: TdApi.MessagePhoto, 
         client: Client,
         caption: String?
     ): MediaAttachment? {
-        // Get the largest photo size that's under our limit
         val photoSize = content.photo.sizes
             .filter { it.photo.size <= MAX_FILE_SIZE }
             .maxByOrNull { it.width * it.height }
         
         if (photoSize == null) {
-            logger.debug { "No suitable photo size found (all exceed ${MAX_FILE_SIZE / 1024 / 1024}MB)" }
+            logger.debug { "No suitable photo size found" }
             return null
         }
         
-        val file = photoSize.photo
-        val localPath = downloadFile(client, file.id, "photo_${UUID.randomUUID()}.jpg")
+        val localPath = downloadFile(client, photoSize.photo.id, "photo_${UUID.randomUUID()}.jpg")
         
         return if (localPath != null) {
             MediaAttachment(
                 type = MediaType.PHOTO,
                 filePath = localPath,
                 originalFileName = "photo.jpg",
-                fileSize = file.size.toLong(),
+                fileSize = photoSize.photo.size.toLong(),
                 mimeType = "image/jpeg",
                 caption = caption,
                 width = photoSize.width,
@@ -218,7 +171,7 @@ class MediaDownloader {
         val video = content.video
         
         if (video.video.size > MAX_FILE_SIZE) {
-            logger.debug { "Video too large: ${video.video.size / 1024 / 1024}MB (limit: ${MAX_FILE_SIZE / 1024 / 1024}MB)" }
+            logger.debug { "Video too large: ${video.video.size / 1024 / 1024}MB" }
             return null
         }
         
@@ -251,11 +204,10 @@ class MediaDownloader {
         val document = content.document
         
         if (document.document.size > MAX_FILE_SIZE) {
-            logger.debug { "Document too large: ${document.document.size / 1024 / 1024}MB (limit: ${MAX_FILE_SIZE / 1024 / 1024}MB)" }
+            logger.debug { "Document too large: ${document.document.size / 1024 / 1024}MB" }
             return null
         }
         
-        // Use original filename or generate one
         val originalFileName = document.fileName.ifBlank { "document_${UUID.randomUUID()}" }
         val localPath = downloadFile(client, document.document.id, originalFileName)
         
@@ -271,35 +223,6 @@ class MediaDownloader {
         } else null
     }
     
-    private suspend fun downloadAudio(
-        content: TdApi.MessageAudio, 
-        client: Client,
-        caption: String?
-    ): MediaAttachment? {
-        val audio = content.audio
-        
-        if (audio.audio.size > MAX_FILE_SIZE) {
-            logger.debug { "Audio too large: ${audio.audio.size / 1024 / 1024}MB (limit: ${MAX_FILE_SIZE / 1024 / 1024}MB)" }
-            return null
-        }
-        
-        // Use original filename or generate one
-        val originalFileName = audio.fileName.ifBlank { "audio_${UUID.randomUUID()}.mp3" }
-        val localPath = downloadFile(client, audio.audio.id, originalFileName)
-        
-        return if (localPath != null) {
-            MediaAttachment(
-                type = MediaType.AUDIO,
-                filePath = localPath,
-                originalFileName = originalFileName,
-                fileSize = audio.audio.size.toLong(),
-                mimeType = audio.mimeType,
-                caption = caption,
-                duration = audio.duration
-            )
-        } else null
-    }
-    
     private suspend fun downloadVoiceNote(
         content: TdApi.MessageVoiceNote, 
         client: Client,
@@ -308,7 +231,7 @@ class MediaDownloader {
         val voice = content.voiceNote
         
         if (voice.voice.size > MAX_FILE_SIZE) {
-            logger.debug { "Voice note too large: ${voice.voice.size / 1024 / 1024}MB (limit: ${MAX_FILE_SIZE / 1024 / 1024}MB)" }
+            logger.debug { "Voice note too large: ${voice.voice.size / 1024 / 1024}MB" }
             return null
         }
         
@@ -335,11 +258,10 @@ class MediaDownloader {
         val animation = content.animation
         
         if (animation.animation.size > MAX_FILE_SIZE) {
-            logger.debug { "Animation too large: ${animation.animation.size / 1024 / 1024}MB (limit: ${MAX_FILE_SIZE / 1024 / 1024}MB)" }
+            logger.debug { "Animation too large: ${animation.animation.size / 1024 / 1024}MB" }
             return null
         }
         
-        // Use original filename or generate one
         val originalFileName = animation.fileName.ifBlank { "animation_${UUID.randomUUID()}.gif" }
         val localPath = downloadFile(client, animation.animation.id, originalFileName)
         
@@ -359,8 +281,7 @@ class MediaDownloader {
     }
     
     /**
-     * ENHANCED: Download a file from TDLib with comprehensive Unicode handling
-     * Returns local file path on success, null on failure
+     * FOCUSED FIX: Download file with proper Unicode path handling
      */
     private suspend fun downloadFile(
         client: Client, 
@@ -369,23 +290,21 @@ class MediaDownloader {
     ): String? = withContext(Dispatchers.IO) {
         
         try {
-            // Sanitize filename to avoid Unicode/space issues
-            val sanitizedFileName = sanitizeFilename(fileName)
-            val localPath = File(TMP_DIR, sanitizedFileName).absolutePath
+            // Use simple ASCII filename to avoid Unicode issues
+            val safeFileName = generateSafeFilename(fileName)
+            val targetPath = File(TMP_DIR, safeFileName).absolutePath
             val deferred = CompletableDeferred<String?>()
             
-            logger.debug { "Starting download: fileId=$fileId, original='$fileName', sanitized='$sanitizedFileName'" }
+            logger.debug { "Starting download: fileId=$fileId, targetPath=$targetPath" }
             
             // Start the download
             client.send(TdApi.DownloadFile(fileId, 1, 0, 0, false)) { result ->
                 when (result) {
                     is TdApi.File -> {
                         if (result.local.isDownloadingCompleted) {
-                            // File already downloaded or download completed immediately
-                            handleCompletedDownload(result, localPath, deferred)
+                            handleCompletedDownload(result, targetPath, deferred)
                         } else {
-                            // Download started, will be handled by polling
-                            logger.debug { "Download started for fileId=$fileId, will poll for completion" }
+                            logger.debug { "Download started for fileId=$fileId, polling..." }
                         }
                     }
                     is TdApi.Error -> {
@@ -395,7 +314,7 @@ class MediaDownloader {
                 }
             }
             
-            // Start polling for download completion
+            // Poll for completion
             val pollJob = launch {
                 var pollCount = 0
                 
@@ -403,38 +322,33 @@ class MediaDownloader {
                     delay(DOWNLOAD_POLL_INTERVAL_MS)
                     pollCount++
                     
-                    // Check file status
                     client.send(TdApi.GetFile(fileId)) { fileResult ->
                         when (fileResult) {
                             is TdApi.File -> {
                                 if (fileResult.local.isDownloadingCompleted) {
-                                    handleCompletedDownload(fileResult, localPath, deferred)
-                                } else {
-                                    logger.debug { "Poll $pollCount: Download still in progress for fileId=$fileId" }
+                                    handleCompletedDownload(fileResult, targetPath, deferred)
                                 }
                             }
                             is TdApi.Error -> {
-                                logger.warn { "Error getting file status during polling: ${fileResult.message}" }
+                                logger.warn { "Error getting file status: ${fileResult.message}" }
                                 deferred.complete(null)
                             }
                         }
                     }
                 }
                 
-                // If we've exhausted our poll attempts, fail the download
                 if (pollCount >= MAX_POLL_ATTEMPTS && !deferred.isCompleted) {
-                    logger.warn { "Download timeout for fileId=$fileId after $pollCount polls" }
+                    logger.warn { "Download timeout for fileId=$fileId" }
                     deferred.complete(null)
                 }
             }
             
-            // Wait for download completion or timeout
             try {
-                withTimeout(DOWNLOAD_TIMEOUT_MS + 1000) { // Extra 1 second for cleanup
+                withTimeout(DOWNLOAD_TIMEOUT_MS + 1000) {
                     deferred.await()
                 }
             } catch (e: TimeoutCancellationException) {
-                logger.warn { "Overall download timeout for fileId=$fileId" }
+                logger.warn { "Overall timeout for fileId=$fileId" }
                 pollJob.cancel()
                 null
             } finally {
@@ -448,7 +362,7 @@ class MediaDownloader {
     }
     
     /**
-     * ENHANCED: Handle completed download with comprehensive Unicode file handling
+     * FOCUSED FIX: Handle the Unicode path issue with file size verification
      */
     private fun handleCompletedDownload(
         file: TdApi.File,
@@ -456,203 +370,85 @@ class MediaDownloader {
         deferred: CompletableDeferred<String?>
     ) {
         try {
-            val sourcePath = file.local.path
+            val tdlibSourcePath = file.local.path
+            val expectedSize = file.size.toLong()
             
-            if (sourcePath.isNullOrBlank()) {
-                logger.warn { "Download completed but source path is empty" }
+            if (tdlibSourcePath.isNullOrBlank()) {
+                logger.warn { "TDLib source path is empty" }
                 deferred.complete(null)
                 return
             }
             
-            logger.debug { "Attempting to copy from TDLib path: '$sourcePath' to '$targetPath'" }
+            logger.debug { "TDLib reports file at: '$tdlibSourcePath' (expected size: $expectedSize bytes)" }
             
-            // Try multiple approaches to find the actual file
-            val sourceFile = findActualSourceFile(sourcePath)
-            
-            if (sourceFile == null) {
-                logger.warn { "Could not find source file for path: $sourcePath" }
+            val parentDir = File(tdlibSourcePath).parentFile
+            if (parentDir?.exists() != true) {
+                logger.warn { "Parent directory doesn't exist: ${parentDir?.absolutePath}" }
                 deferred.complete(null)
                 return
             }
             
-            handleFileFound(sourceFile, targetPath, deferred)
+            logger.debug { "Listing files in directory: ${parentDir.absolutePath}" }
             
-        } catch (e: Exception) {
-            logger.error(e) { "Failed to handle completed download" }
-            deferred.complete(null)
-        }
-    }
-    
-    /**
-     * NEW: Comprehensive file finding with multiple encoding approaches
-     */
-    private fun findActualSourceFile(reportedPath: String): File? {
-        try {
-            // 1. Try the reported path directly
-            val directFile = File(reportedPath)
-            if (directFile.exists() && directFile.canRead() && directFile.length() > 0) {
-                logger.debug { "Found file directly: ${directFile.absolutePath}" }
-                return directFile
-            }
-            
-            // 2. Try using NIO Path API (better Unicode support)
-            try {
-                val nioPath = Paths.get(reportedPath)
-                if (Files.exists(nioPath) && Files.isReadable(nioPath) && Files.size(nioPath) > 0) {
-                    logger.debug { "Found file via NIO: $nioPath" }
-                    return nioPath.toFile()
+            // IMPROVED: Find file that matches the expected size AND is recent
+            val now = System.currentTimeMillis()
+            val candidateFiles = parentDir.listFiles()
+                ?.filter { 
+                    it.isFile && 
+                    it.length() > 0 && 
+                    it.canRead() &&
+                    it.length() == expectedSize &&  // EXACT size match
+                    (now - it.lastModified()) < 300000  // Modified within last 5 minutes
                 }
-            } catch (e: Exception) {
-                logger.debug { "NIO path access failed: ${e.message}" }
-            }
+                ?.sortedByDescending { it.lastModified() }
             
-            // 3. Try parent directory search with various matching strategies
-            val parentDir = directFile.parentFile
-            if (parentDir?.exists() == true) {
-                logger.debug { "Searching for alternative files in: ${parentDir.absolutePath}" }
+            if (candidateFiles.isNullOrEmpty()) {
+                logger.warn { "No files found matching size $expectedSize in directory: ${parentDir.absolutePath}" }
                 
-                val candidateFile = findBestMatchInDirectory(parentDir, directFile.name)
-                if (candidateFile != null) {
-                    logger.info { "Found alternative file: ${candidateFile.absolutePath}" }
-                    return candidateFile
+                // Debug: show what files are actually there
+                parentDir.listFiles()?.forEach { file ->
+                    logger.debug { "  Found: ${file.name} (${file.length()} bytes, age: ${(now - file.lastModified()) / 1000}s)" }
                 }
-            }
-            
-            logger.debug { "No matching file found for: $reportedPath" }
-            return null
-            
-        } catch (e: Exception) {
-            logger.warn(e) { "Error finding source file for: $reportedPath" }
-            return null
-        }
-    }
-    
-    /**
-     * NEW: Advanced file matching in directory with Unicode awareness
-     */
-    private fun findBestMatchInDirectory(parentDir: File, targetName: String): File? {
-        try {
-            val files = parentDir.listFiles() ?: return null
-            
-            // 1. First priority: Recent files (modified in last 2 minutes)
-            val recentFiles = files.filter { 
-                it.isFile && 
-                it.length() > 0 &&
-                it.canRead() &&
-                System.currentTimeMillis() - it.lastModified() < 120000 // 2 minutes
-            }.sortedByDescending { it.lastModified() }
-            
-            if (recentFiles.isNotEmpty()) {
-                logger.debug { "Found ${recentFiles.size} recent files, using most recent: ${recentFiles.first().name}" }
-                return recentFiles.first()
-            }
-            
-            // 2. Try exact name match (case-sensitive)
-            val exactMatch = files.find { 
-                it.isFile && it.name == targetName && it.length() > 0 && it.canRead()
-            }
-            if (exactMatch != null) {
-                logger.debug { "Found exact case-sensitive match: ${exactMatch.name}" }
-                return exactMatch
-            }
-            
-            // 3. Try case-insensitive match
-            val caseInsensitiveMatch = files.find { 
-                it.isFile && 
-                it.name.equals(targetName, ignoreCase = true) && 
-                it.length() > 0 && 
-                it.canRead()
-            }
-            if (caseInsensitiveMatch != null) {
-                logger.debug { "Found case-insensitive match: ${caseInsensitiveMatch.name}" }
-                return caseInsensitiveMatch
-            }
-            
-            // 4. Try normalized Unicode comparison
-            val normalizedTarget = java.text.Normalizer.normalize(targetName, java.text.Normalizer.Form.NFC)
-            val normalizedMatch = files.find { file ->
-                file.isFile && 
-                file.length() > 0 && 
-                file.canRead() &&
-                java.text.Normalizer.normalize(file.name, java.text.Normalizer.Form.NFC).equals(normalizedTarget, ignoreCase = true)
-            }
-            if (normalizedMatch != null) {
-                logger.debug { "Found normalized Unicode match: ${normalizedMatch.name}" }
-                return normalizedMatch
-            }
-            
-            // 5. Try extension-based matching
-            val targetExtension = if (targetName.contains('.')) targetName.substringAfterLast('.').lowercase() else ""
-            if (targetExtension.isNotEmpty()) {
-                val extensionMatch = files.find { file ->
-                    file.isFile && 
-                    file.length() > 0 && 
-                    file.canRead() &&
-                    file.name.lowercase().endsWith(".$targetExtension")
-                }
-                if (extensionMatch != null) {
-                    logger.debug { "Found extension-based match: ${extensionMatch.name}" }
-                    return extensionMatch
-                }
-            }
-            
-            // 6. Last resort: any readable file with content
-            val anyValidFile = files.find { 
-                it.isFile && it.length() > 0 && it.canRead()
-            }
-            if (anyValidFile != null) {
-                logger.debug { "Using any valid file as last resort: ${anyValidFile.name}" }
-                return anyValidFile
-            }
-            
-            logger.debug { "No suitable file found among ${files.size} files in directory" }
-            return null
-            
-        } catch (e: Exception) {
-            logger.warn(e) { "Error searching directory for file match" }
-            return null
-        }
-    }
-    
-    /**
-     * Handle copying a found file to the target location
-     */
-    private fun handleFileFound(
-        sourceFile: File,
-        targetPath: String,
-        deferred: CompletableDeferred<String?>
-    ) {
-        try {
-            if (!sourceFile.canRead()) {
-                logger.warn { "Source file is not readable: ${sourceFile.absolutePath}" }
+                
                 deferred.complete(null)
                 return
             }
             
-            if (sourceFile.length() == 0L) {
-                logger.warn { "Source file is empty: ${sourceFile.absolutePath}" }
-                deferred.complete(null)
-                return
-            }
+            val actualFile = candidateFiles.first()
+            logger.debug { "Found matching file: ${actualFile.name} (${actualFile.length()} bytes, modified ${(now - actualFile.lastModified()) / 1000}s ago)" }
             
-            // Try to copy the file
+            // Copy to our target location
             val targetFile = File(targetPath)
-            sourceFile.copyTo(targetFile, overwrite = true)
+            actualFile.copyTo(targetFile, overwrite = true)
             
-            // Verify the copy was successful
-            if (!targetFile.exists() || targetFile.length() != sourceFile.length()) {
-                logger.warn { "File copy verification failed: target=${targetFile.exists()}, sizes: ${sourceFile.length()} -> ${targetFile.length()}" }
+            // Verify copy
+            if (!targetFile.exists() || targetFile.length() != actualFile.length()) {
+                logger.warn { "File copy verification failed: exists=${targetFile.exists()}, size=${targetFile.length()}/${actualFile.length()}" }
                 deferred.complete(null)
                 return
             }
             
-            logger.debug { "File downloaded and copied successfully: $targetPath (${targetFile.length()} bytes)" }
+            logger.debug { "Successfully copied file to: $targetPath (${targetFile.length()} bytes)" }
             deferred.complete(targetPath)
             
         } catch (e: Exception) {
-            logger.error(e) { "Failed to copy file: ${sourceFile.absolutePath} -> $targetPath" }
+            logger.error(e) { "Error handling completed download" }
             deferred.complete(null)
         }
+    }
+    
+    /**
+     * Generate a safe ASCII filename to avoid Unicode issues
+     */
+    private fun generateSafeFilename(originalName: String): String {
+        val extension = if (originalName.contains('.')) {
+            "." + originalName.substringAfterLast('.')
+        } else ""
+        
+        val timestamp = System.currentTimeMillis()
+        val random = (1000..9999).random()
+        
+        return "media_${timestamp}_${random}$extension"
     }
     
     /**
@@ -663,18 +459,16 @@ class MediaDownloader {
             try {
                 val file = File(attachment.filePath)
                 if (file.exists() && file.delete()) {
-                    logger.debug { "Cleaned up media file: ${attachment.filePath}" }
-                } else {
-                    logger.debug { "Media file not found or couldn't delete: ${attachment.filePath}" }
+                    logger.debug { "Cleaned up: ${attachment.filePath}" }
                 }
             } catch (e: Exception) {
-                logger.warn(e) { "Error cleaning up media file: ${attachment.filePath}" }
+                logger.warn(e) { "Error cleaning up: ${attachment.filePath}" }
             }
         }
     }
     
     /**
-     * Clean up old temp files (older than 1 hour)
+     * Clean up old temp files
      */
     fun cleanupOldTempFiles() {
         try {
@@ -685,10 +479,8 @@ class MediaDownloader {
             var cleanedCount = 0
             
             tempDir.listFiles()?.forEach { file ->
-                if (file.lastModified() < oneHourAgo) {
-                    if (file.delete()) {
-                        cleanedCount++
-                    }
+                if (file.lastModified() < oneHourAgo && file.delete()) {
+                    cleanedCount++
                 }
             }
             
