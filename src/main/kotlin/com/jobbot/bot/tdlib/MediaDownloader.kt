@@ -385,7 +385,7 @@ class MediaDownloader {
     }
     
     /**
-     * PROPER JAVA SOLUTION: Handle completed download with encoding fix
+     * CLEAN SOLUTION: Handle completed download with proper UTF-8 configuration
      */
     private fun handleCompletedDownload(
         file: TdApi.File,
@@ -418,29 +418,224 @@ class MediaDownloader {
             
             logger.debug { "TDLib reports file at: '$tdlibSourcePath' (verified size: $expectedSize bytes)" }
             
-            // Get parent directory for encoding diagnosis
-            val parentDir = File(tdlibSourcePath).parentFile
+            // Verify UTF-8 encoding is working (one-time check)
+            verifyUtf8Configuration()
             
+            // Try direct file access first (should work with proper UTF-8)
+            val directFile = File(tdlibSourcePath)
+            if (tryDirectFileAccess(directFile, expectedSize, targetPath, deferred)) {
+                return
+            }
+            
+            // Fallback: Use NIO approach
+            val parentDir = directFile.parentFile
             if (parentDir?.exists() == true) {
-                // Run encoding diagnostic first
-                diagnoseJvmEncoding(parentDir)
-                
-                // Try to find and access the file with proper encoding
-                val actualFile = findFileWithProperEncoding(parentDir, expectedSize)
-                if (actualFile != null) {
-                    logger.info { "✅ Found file with proper encoding: ${actualFile.absolutePath}" }
-                    copyFileToTarget(actualFile, targetPath, deferred)
+                val sourceFile = findFileWithNio(parentDir, expectedSize)
+                if (sourceFile != null) {
+                    logger.info { "✅ Found file via NIO fallback: ${sourceFile.fileName}" }
+                    copyFileWithNio(sourceFile, targetPath, deferred)
                     return
                 }
             } else {
                 logger.warn { "Parent directory does not exist: ${parentDir?.absolutePath}" }
             }
             
-            logger.warn { "Could not locate file with proper Java encoding" }
+            logger.warn { "Could not locate file with any approach" }
             deferred.complete(null)
             
         } catch (e: Exception) {
             logger.error(e) { "Error handling completed download" }
+            deferred.complete(null)
+        }
+    }
+    
+    /**
+     * Verify UTF-8 encoding configuration (one-time check)
+     */
+    private fun verifyUtf8Configuration() {
+        // Only run this check once per instance
+        if (this::class.java.getField("utf8Verified").getBoolean(null)) return
+        
+        val fileEncoding = System.getProperty("file.encoding")
+        val sunJnuEncoding = System.getProperty("sun.jnu.encoding")
+        val defaultCharset = java.nio.charset.Charset.defaultCharset()
+        
+        logger.info { "UTF-8 Configuration Check:" }
+        logger.info { "  file.encoding: $fileEncoding" }
+        logger.info { "  sun.jnu.encoding: $sunJnuEncoding" }
+        logger.info { "  default charset: $defaultCharset" }
+        
+        if (fileEncoding == "UTF-8" && sunJnuEncoding == "UTF-8") {
+            logger.info { "✅ UTF-8 encoding properly configured!" }
+        } else {
+            logger.warn { "⚠️ UTF-8 encoding not fully configured - some Unicode filenames may fail" }
+            logger.warn { "  Consider setting JVM args: -Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8" }
+        }
+        
+        // Mark as checked
+        try {
+            this::class.java.getDeclaredField("utf8Verified").setBoolean(null, true)
+        } catch (e: Exception) {
+            // Create the field if it doesn't exist (this is just for one-time checking)
+        }
+    }
+    
+    companion object {
+        @JvmStatic
+        private var utf8Verified = false
+    }
+    
+    /**
+     * Try direct file access (should work with proper UTF-8 encoding)
+     */
+    private fun tryDirectFileAccess(
+        directFile: File, 
+        expectedSize: Long, 
+        targetPath: String, 
+        deferred: CompletableDeferred<String?>
+    ): Boolean {
+        try {
+            if (!directFile.exists()) {
+                logger.debug { "Direct file access failed: file does not exist" }
+                return false
+            }
+            
+            if (!directFile.isFile()) {
+                logger.debug { "Direct file access failed: not a regular file" }
+                return false
+            }
+            
+            val actualSize = directFile.length()
+            if (actualSize != expectedSize) {
+                logger.debug { "Direct file access failed: size mismatch (expected $expectedSize, got $actualSize)" }
+                return false
+            }
+            
+            if (actualSize == 0L) {
+                logger.debug { "Direct file access failed: file has 0 bytes" }
+                return false
+            }
+            
+            // Test actual read access
+            directFile.inputStream().use { stream ->
+                val buffer = ByteArray(1024)
+                val bytesRead = stream.read(buffer)
+                if (bytesRead > 0) {
+                    logger.info { "✅ Direct file access successful with UTF-8! ($actualSize bytes)" }
+                    copyFileToTarget(directFile, targetPath, deferred)
+                    return true
+                }
+            }
+            
+            return false
+            
+        } catch (e: Exception) {
+            logger.debug { "Direct file access failed: ${e.javaClass.simpleName} - ${e.message}" }
+            return false
+        }
+    }
+    
+    /**
+     * Find file using NIO which properly handles the filesystem encoding
+     */
+    private fun findFileWithNio(directory: File, expectedSize: Long): java.nio.file.Path? {
+        return try {
+            logger.info { "Searching for file with NIO (size: $expectedSize bytes)" }
+            
+            val dirPath = directory.toPath()
+            
+            // Use NIO directory stream which handles filesystem encoding correctly
+            java.nio.file.Files.newDirectoryStream(dirPath).use { stream ->
+                for (filePath in stream) {
+                    try {
+                        // Check if it's a regular file
+                        if (!java.nio.file.Files.isRegularFile(filePath)) continue
+                        
+                        // Check size using NIO (more reliable than File.length())
+                        val fileSize = java.nio.file.Files.size(filePath)
+                        
+                        if (fileSize == expectedSize) {
+                            logger.info { "Found matching file: size=$fileSize, path=${filePath.fileName}" }
+                            
+                            // Verify we can actually read this file
+                            if (java.nio.file.Files.isReadable(filePath)) {
+                                logger.info { "File is readable via NIO" }
+                                return filePath
+                            } else {
+                                logger.warn { "File found but not readable" }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        logger.debug { "Error checking file ${filePath.fileName}: ${e.message}" }
+                    }
+                }
+            }
+            
+            logger.warn { "No matching files found in directory" }
+            null
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error in findFileWithNio" }
+            null
+        }
+    }
+    
+    /**
+     * Copy file using NIO to bypass encoding issues
+     */
+    private fun copyFileWithNio(
+        sourcePath: java.nio.file.Path,
+        targetPath: String,
+        deferred: CompletableDeferred<String?>
+    ) {
+        try {
+            val targetNioPath = java.nio.file.Paths.get(targetPath)
+            
+            // Ensure target directory exists
+            targetNioPath.parent?.let { parent ->
+                java.nio.file.Files.createDirectories(parent)
+            }
+            
+            logger.debug { "Copying with NIO: ${sourcePath.fileName} -> $targetPath" }
+            
+            // Use NIO copy which handles encoding properly
+            java.nio.file.Files.copy(
+                sourcePath, 
+                targetNioPath, 
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING
+            )
+            
+            // Verify the copy using NIO
+            if (java.nio.file.Files.exists(targetNioPath)) {
+                val copiedSize = java.nio.file.Files.size(targetNioPath)
+                val originalSize = java.nio.file.Files.size(sourcePath)
+                
+                if (copiedSize == originalSize && copiedSize > 0) {
+                    // Final verification: try to read first few bytes
+                    try {
+                        java.nio.file.Files.newInputStream(targetNioPath).use { stream ->
+                            val testBytes = stream.readNBytes(1024)
+                            if (testBytes.isNotEmpty()) {
+                                logger.info { "✅ File successfully copied with NIO ($copiedSize bytes)" }
+                                deferred.complete(targetPath)
+                                return
+                            }
+                        }
+                    } catch (e: Exception) {
+                        logger.warn { "Copied file not readable: ${e.message}" }
+                    }
+                } else {
+                    logger.warn { "Copy verification failed: original=$originalSize, copied=$copiedSize" }
+                }
+            } else {
+                logger.warn { "Target file does not exist after NIO copy" }
+            }
+            
+            logger.warn { "NIO copy failed verification" }
+            deferred.complete(null)
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error copying file with NIO: ${e.message}" }
             deferred.complete(null)
         }
     }
