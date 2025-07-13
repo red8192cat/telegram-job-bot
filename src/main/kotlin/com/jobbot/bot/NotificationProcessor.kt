@@ -254,7 +254,6 @@ class NotificationProcessor(
     
     /**
     * Send notification with media attachments using proper Telegram media group
-    * PROPER: Uses sendMediaGroup API for true album experience
     */
     private suspend fun sendNotificationWithMedia(
         notification: NotificationMessage,
@@ -285,6 +284,7 @@ class NotificationProcessor(
 
     /**
     * Send proper Telegram media group (album) - appears as ONE message with multiple media
+    * FIXED: Correct API v9.x implementation
     */
     private suspend fun sendProperMediaGroup(
         chatId: String,
@@ -335,7 +335,8 @@ class NotificationProcessor(
     }
 
     /**
-    * Send Telegram media group using correct API
+    * Send Telegram media group using correct API v9.x
+    * FIXED: Proper InputMedia constructor usage
     */
     private suspend fun sendTelegramMediaGroup(
         chatId: String,
@@ -346,6 +347,7 @@ class NotificationProcessor(
         try {
             // Create media list with proper InputMedia objects
             val mediaList = mutableListOf<InputMedia>()
+            val inputFiles = mutableMapOf<String, InputFile>()
             
             for (i in attachments.indices) {
                 val attachment = attachments[i]
@@ -357,7 +359,9 @@ class NotificationProcessor(
                 }
                 
                 // Create InputFile for this attachment
-                val inputFile = InputFile(file, "media_$i")
+                val attachmentName = "media_$i"
+                val inputFile = InputFile(file, attachmentName)
+                inputFiles[attachmentName] = inputFile
                 
                 // Only first item gets caption
                 val caption = if (i == 0) markdownContent else null
@@ -365,22 +369,36 @@ class NotificationProcessor(
                 
                 val media = when (attachment.type) {
                     MediaType.PHOTO -> {
-                        InputMediaPhoto().apply {
-                            media = inputFile.attachName // Use attachment name
-                            if (caption != null) this.caption = caption
-                            if (parseMode != null) this.parseMode = parseMode
+                        // FIXED: Use builder pattern for API v9.x
+                        val photoBuilder = InputMediaPhoto.builder()
+                            .media(attachmentName) // Reference to the attachment
+                        
+                        if (caption != null) {
+                            photoBuilder.caption(caption)
                         }
+                        if (parseMode != null) {
+                            photoBuilder.parseMode(parseMode)
+                        }
+                        
+                        photoBuilder.build()
                     }
                     
                     MediaType.VIDEO -> {
-                        InputMediaVideo().apply {
-                            media = inputFile.attachName // Use attachment name
-                            if (caption != null) this.caption = caption
-                            if (parseMode != null) this.parseMode = parseMode
-                            attachment.width?.let { this.width = it }
-                            attachment.height?.let { this.height = it }
-                            attachment.duration?.let { this.duration = it }
+                        // FIXED: Use builder pattern for API v9.x
+                        val videoBuilder = InputMediaVideo.builder()
+                            .media(attachmentName) // Reference to the attachment
+                        
+                        if (caption != null) {
+                            videoBuilder.caption(caption)
                         }
+                        if (parseMode != null) {
+                            videoBuilder.parseMode(parseMode)
+                        }
+                        attachment.width?.let { videoBuilder.width(it) }
+                        attachment.height?.let { videoBuilder.height(it) }
+                        attachment.duration?.let { videoBuilder.duration(it) }
+                        
+                        videoBuilder.build()
                     }
                     
                     else -> continue // Skip non-groupable types
@@ -395,16 +413,16 @@ class NotificationProcessor(
             }
             
             // Create the sendMediaGroup request
-            val sendMediaGroup = SendMediaGroup(chatId, mediaList)
+            val sendMediaGroupBuilder = SendMediaGroup.builder()
+                .chatId(chatId)
+                .medias(mediaList)
             
-            // Add all files to the request
-            for (i in attachments.indices) {
-                val attachment = attachments[i]
-                val file = File(attachment.filePath)
-                if (file.exists() && (attachment.type == MediaType.PHOTO || attachment.type == MediaType.VIDEO)) {
-                    sendMediaGroup.addInputFile(InputFile(file, "media_$i"))
-                }
+            // Add all input files to the request
+            inputFiles.values.forEach { inputFile ->
+                sendMediaGroupBuilder.addInputFile(inputFile)
             }
+            
+            val sendMediaGroup = sendMediaGroupBuilder.build()
             
             // Try to send with MarkdownV2 first
             val success = try {
@@ -424,29 +442,42 @@ class NotificationProcessor(
                     
                     // Recreate with plain text
                     val plainMediaList = mutableListOf<InputMedia>()
+                    val plainInputFiles = mutableMapOf<String, InputFile>()
                     
                     for (i in attachments.indices) {
                         val attachment = attachments[i]
-                        if (attachment.type != MediaType.PHOTO && attachment.type != MediaType.VIDEO) continue
+                        val file = File(attachment.filePath)
+                        if (!file.exists() || (attachment.type != MediaType.PHOTO && attachment.type != MediaType.VIDEO)) continue
                         
-                        val inputFile = InputFile(File(attachment.filePath), "media_$i")
+                        val attachmentName = "media_plain_$i"
+                        val inputFile = InputFile(file, attachmentName)
+                        plainInputFiles[attachmentName] = inputFile
+                        
                         val caption = if (i == 0) plainContent else null
                         
                         val media = when (attachment.type) {
                             MediaType.PHOTO -> {
-                                InputMediaPhoto().apply {
-                                    media = inputFile.attachName
-                                    if (caption != null) this.caption = caption
+                                val photoBuilder = InputMediaPhoto.builder()
+                                    .media(attachmentName)
+                                
+                                if (caption != null) {
+                                    photoBuilder.caption(caption)
                                 }
+                                
+                                photoBuilder.build()
                             }
                             MediaType.VIDEO -> {
-                                InputMediaVideo().apply {
-                                    media = inputFile.attachName
-                                    if (caption != null) this.caption = caption
-                                    attachment.width?.let { this.width = it }
-                                    attachment.height?.let { this.height = it }
-                                    attachment.duration?.let { this.duration = it }
+                                val videoBuilder = InputMediaVideo.builder()
+                                    .media(attachmentName)
+                                
+                                if (caption != null) {
+                                    videoBuilder.caption(caption)
                                 }
+                                attachment.width?.let { videoBuilder.width(it) }
+                                attachment.height?.let { videoBuilder.height(it) }
+                                attachment.duration?.let { videoBuilder.duration(it) }
+                                
+                                videoBuilder.build()
                             }
                             else -> continue
                         }
@@ -454,16 +485,15 @@ class NotificationProcessor(
                         plainMediaList.add(media)
                     }
                     
-                    val plainSendMediaGroup = SendMediaGroup(chatId, plainMediaList)
+                    val plainSendMediaGroupBuilder = SendMediaGroup.builder()
+                        .chatId(chatId)
+                        .medias(plainMediaList)
                     
-                    // Add files to plain request
-                    for (i in attachments.indices) {
-                        val attachment = attachments[i]
-                        val file = File(attachment.filePath)
-                        if (file.exists() && (attachment.type == MediaType.PHOTO || attachment.type == MediaType.VIDEO)) {
-                            plainSendMediaGroup.addInputFile(InputFile(file, "media_$i"))
-                        }
+                    plainInputFiles.values.forEach { inputFile ->
+                        plainSendMediaGroupBuilder.addInputFile(inputFile)
                     }
+                    
+                    val plainSendMediaGroup = plainSendMediaGroupBuilder.build()
                     
                     withTimeout(25000) {
                         withContext(Dispatchers.IO) {
