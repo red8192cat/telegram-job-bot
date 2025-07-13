@@ -14,8 +14,8 @@ import org.drinkless.tdlib.TdApi
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Handles TDLib message monitoring and processing with CONSISTENT MarkdownV2 formatting support
- * FIXED: Unified entity processing for both channels and groups
+ * Handles TDLib message monitoring and processing with MEDIA DOWNLOAD support
+ * UPDATED: Added media attachment downloading and processing
  */
 class ChannelMonitor(
     private val database: Database,
@@ -25,10 +25,23 @@ class ChannelMonitor(
     private val logger = getLogger("ChannelMonitor")
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     
+    // ADDED: Media downloader for handling attachments
+    private val mediaDownloader = MediaDownloader()
+    
     // Bounded cache with automatic cleanup
     private val channelIdCache = object : LinkedHashMap<String, Long>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean {
             return size > 500 // Keep max 500 entries
+        }
+    }
+    
+    init {
+        // Start periodic cleanup of old temp files
+        scope.launch {
+            while (isActive) {
+                delay(3600000) // Every hour
+                mediaDownloader.cleanupOldTempFiles()
+            }
         }
     }
     
@@ -62,59 +75,9 @@ class ChannelMonitor(
                 
                 logger.info { "Processing message from monitored chat: $channelId (type: ${if (isChannelPost) "channel" else "group"})" }
                 
-                // 🔧 FIXED: Use consistent entity processing for both channels and groups
-                val (plainText, formattedText) = extractMessageContent(message.content)
-                
-                if (plainText.isBlank()) {
-                    logger.debug { "Message has no text content, skipping" }
-                    return
-                }
-                
-                logger.debug { "Processing plain text: '$plainText'" }
-                if (formattedText != plainText) {
-                    logger.debug { "Generated formatted text with ${formattedText.length - plainText.length} additional markup characters" }
-                }
-                
+                // Process message with media downloads
                 scope.launch {
-                    try {
-                        // Get channel details
-                        val channelDetails = database.getAllChannelsWithDetails().find { it.channelId == channelId }
-                        val displayName = when {
-                            !channelDetails?.channelTag.isNullOrBlank() -> channelDetails!!.channelTag!!
-                            !channelDetails?.channelName.isNullOrBlank() -> channelDetails!!.channelName!!
-                            else -> if (isChannelPost) "Channel" else "Group"
-                        }
-                        
-                        // Generate message link (for both channels and groups)
-                        val messageLink = generateMessageLink(channelDetails, message.id)
-                        
-                        // Create ChannelMessage with simplified data
-                        val channelMessage = ChannelMessage(
-                            channelId = channelId,
-                            channelName = displayName,
-                            messageId = message.id,
-                            text = plainText, // For keyword matching
-                            formattedText = formattedText, // For user notifications
-                            senderUsername = null, // Not needed anymore
-                            messageLink = messageLink
-                        )
-                        
-                        logger.debug { "Calling messageProcessor.processChannelMessage..." }
-                        val notifications = messageProcessor.processChannelMessage(channelMessage)
-                        
-                        logger.info { "Message processing complete. Generated ${notifications.size} notifications" }
-                        
-                        // Queue notifications
-                        for (notification in notifications) {
-                            logger.debug { "Queueing notification for user ${notification.userId}" }
-                            bot?.queueNotification(notification)
-                        }
-                        
-                        logger.debug { "Processed message from monitored chat $channelId, generated ${notifications.size} notifications" }
-                    } catch (e: Exception) {
-                        logger.error(e) { "Error processing new message" }
-                        ErrorTracker.logError("ERROR", "Message processing error: ${e.message}", e)
-                    }
+                    processMessageWithMedia(message, channelId, client)
                 }
             } else {
                 logger.debug { "Ignoring message from unmonitored chat $chatId (isChannelPost: $isChannelPost)" }
@@ -126,9 +89,89 @@ class ChannelMonitor(
     }
     
     /**
-     * 🔧 FIXED: Unified entity processing for both channels and groups
+     * Process message with media download support
+     */
+    private suspend fun processMessageWithMedia(
+        message: TdApi.Message,
+        channelId: String,
+        client: Client?
+    ) {
+        try {
+            // Extract text content (existing logic)
+            val (plainText, formattedText) = extractMessageContent(message.content)
+            
+            if (plainText.isBlank()) {
+                logger.debug { "Message has no text content, skipping" }
+                return
+            }
+            
+            logger.debug { "Processing plain text: '$plainText'" }
+            if (formattedText != plainText) {
+                logger.debug { "Generated formatted text with ${formattedText.length - plainText.length} additional markup characters" }
+            }
+            
+            // ADDED: Download media attachments
+            logger.debug { "Downloading media attachments for message ${message.id}" }
+            val mediaAttachments = mediaDownloader.downloadMessageMedia(message, client)
+            
+            if (mediaAttachments.isNotEmpty()) {
+                logger.info { "Downloaded ${mediaAttachments.size} media attachments for message ${message.id}" }
+                mediaAttachments.forEach { attachment ->
+                    logger.debug { 
+                        "Downloaded ${attachment.type}: ${attachment.originalFileName} " +
+                        "(${attachment.fileSize / 1024}KB) -> ${attachment.filePath}" 
+                    }
+                }
+            } else {
+                logger.debug { "No media attachments found for message ${message.id}" }
+            }
+            
+            // Get channel details
+            val channelDetails = database.getAllChannelsWithDetails().find { it.channelId == channelId }
+            val displayName = when {
+                !channelDetails?.channelTag.isNullOrBlank() -> channelDetails!!.channelTag!!
+                !channelDetails?.channelName.isNullOrBlank() -> channelDetails!!.channelName!!
+                else -> if (message.isChannelPost) "Channel" else "Group"
+            }
+            
+            // Generate message link (for both channels and groups)
+            val messageLink = generateMessageLink(channelDetails, message.id)
+            
+            // Create ChannelMessage with media attachments
+            val channelMessage = ChannelMessage(
+                channelId = channelId,
+                channelName = displayName,
+                messageId = message.id,
+                text = plainText, // For keyword matching
+                formattedText = formattedText, // For user notifications
+                senderUsername = null, // Not needed anymore
+                messageLink = messageLink,
+                mediaAttachments = mediaAttachments // ADDED: Include media attachments
+            )
+            
+            logger.debug { "Calling messageProcessor.processChannelMessage..." }
+            val notifications = messageProcessor.processChannelMessage(channelMessage)
+            
+            logger.info { "Message processing complete. Generated ${notifications.size} notifications" }
+            
+            // Queue notifications (they now include media attachments)
+            for (notification in notifications) {
+                logger.debug { "Queueing notification for user ${notification.userId} with ${notification.mediaAttachments.size} attachments" }
+                bot?.queueNotification(notification)
+            }
+            
+            logger.debug { "Processed message from monitored chat $channelId, generated ${notifications.size} notifications" }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error processing message with media" }
+            ErrorTracker.logError("ERROR", "Message processing with media error: ${e.message}", e)
+        }
+    }
+    
+    /**
      * Extract both plain text and formatted text from message content
      * Returns Pair<plainText, formattedText>
+     * UNCHANGED: This method remains the same
      */
     private fun extractMessageContent(content: TdApi.MessageContent): Pair<String, String> {
         return when (content) {
@@ -137,7 +180,6 @@ class ChannelMonitor(
                 val formattedText = convertFormattedTextToMarkdown(content.text)
                 logger.debug { "Text message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 
-                // 🔧 FIXED: Unified logging for both channels and groups
                 if (content.text.entities.isNotEmpty()) {
                     logger.debug { "Message entities: ${content.text.entities.size} entities found" }
                     content.text.entities.forEach { entity ->
@@ -167,6 +209,24 @@ class ChannelMonitor(
                 logger.debug { "Document message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
+            is TdApi.MessageAudio -> {
+                val plainText = content.caption?.text ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                logger.debug { "Audio message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
+                Pair(plainText, formattedText)
+            }
+            is TdApi.MessageAnimation -> {
+                val plainText = content.caption?.text ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                logger.debug { "Animation message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
+                Pair(plainText, formattedText)
+            }
+            is TdApi.MessageVoiceNote -> {
+                val plainText = content.caption?.text ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                logger.debug { "Voice note message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
+                Pair(plainText, formattedText)
+            }
             else -> {
                 logger.debug { "Unsupported message type: ${content.javaClass.simpleName}" }
                 Pair("", "")
@@ -175,8 +235,8 @@ class ChannelMonitor(
     }
     
     /**
-     * 🔧 FIXED: Unified MarkdownV2 conversion for both channels and groups
-     * This method now works consistently for all message types
+     * Unified MarkdownV2 conversion for all message types
+     * UNCHANGED: This method remains the same
      */
     private fun convertFormattedTextToMarkdown(formattedText: TdApi.FormattedText): String {
         if (formattedText.entities.isEmpty()) {
@@ -201,7 +261,6 @@ class ChannelMonitor(
                 // Get the entity text
                 val entityText = text.substring(entity.offset, entity.offset + entity.length)
                 
-                // 🔧 FIXED: Unified entity handling for all message types
                 when (entity.type) {
                     is TdApi.TextEntityTypeBold -> {
                         result.append("*${TelegramMarkdownConverter.escapeForFormatting(entityText)}*")
@@ -311,7 +370,6 @@ class ChannelMonitor(
             
             val finalResult = result.toString()
             
-            // 🔧 FIXED: Consistent debug logging - removed validation check
             logger.debug { "Generated MarkdownV2 (${finalResult.length} chars): $finalResult" }
             
             return finalResult

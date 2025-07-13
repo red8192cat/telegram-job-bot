@@ -13,13 +13,21 @@ import java.util.regex.Pattern
 class MessageProcessor(private val database: Database) {
     private val logger = getLogger("MessageProcessor")
     
-    // UPDATED: Now handles both plain text (for matching) and formatted text (for notifications)
+    // UPDATED: Now handles media attachments and passes them to notifications
     suspend fun processChannelMessage(message: ChannelMessage): List<NotificationMessage> = withContext(Dispatchers.IO) {
         val notifications = mutableListOf<NotificationMessage>()
         
         try {
             val users = database.getAllUsers()
             SystemMonitor.incrementMessageCount()
+            
+            // Log media processing
+            if (message.mediaAttachments.isNotEmpty()) {
+                logger.debug { 
+                    "Processing message with ${message.mediaAttachments.size} media attachments: " +
+                    message.mediaAttachments.joinToString(", ") { "${it.type}:${it.originalFileName}" }
+                }
+            }
             
             for (user in users) {
                 if (user.keywords.isNullOrBlank()) continue
@@ -35,6 +43,7 @@ class MessageProcessor(private val database: Database) {
                         message.text
                     }
                     
+                    // UPDATED: Include media attachments in notification
                     notifications.add(
                         NotificationMessage(
                             userId = user.telegramId,
@@ -42,15 +51,23 @@ class MessageProcessor(private val database: Database) {
                             messageText = message.text, // Plain text for fallback
                             formattedMessageText = displayText, // Formatted text for display
                             senderUsername = message.senderUsername,
-                            messageLink = message.messageLink
+                            messageLink = message.messageLink,
+                            mediaAttachments = message.mediaAttachments // ADDED: Pass media attachments
                         )
                     )
                     
-                    logger.debug { "Match found for user ${user.telegramId} in channel ${message.channelId}" }
+                    logger.debug { 
+                        "Match found for user ${user.telegramId} in channel ${message.channelId}" +
+                        if (message.mediaAttachments.isNotEmpty()) " with ${message.mediaAttachments.size} attachments" else ""
+                    }
                 }
             }
             
-            logger.info { "Processed message from ${message.channelId}, found ${notifications.size} matches" }
+            val mediaInfo = if (message.mediaAttachments.isNotEmpty()) {
+                ", ${message.mediaAttachments.size} media attachments"
+            } else ""
+            
+            logger.info { "Processed message from ${message.channelId}, found ${notifications.size} matches$mediaInfo" }
             
         } catch (e: Exception) {
             logger.error(e) { "Error processing channel message" }

@@ -3,7 +3,7 @@ package com.jobbot.data.models
 import java.time.LocalDateTime
 
 // Message processing models
-// UPDATED: Added formattedText support for preserving original formatting
+// UPDATED: Added media attachment support for rich notifications
 data class ChannelMessage(
     val channelId: String,
     val channelName: String?,
@@ -12,10 +12,11 @@ data class ChannelMessage(
     val formattedText: String? = null, // Formatted text for user notifications (MarkdownV2)
     val timestamp: LocalDateTime = LocalDateTime.now(),
     val senderUsername: String? = null,
-    val messageLink: String? = null
+    val messageLink: String? = null,
+    val mediaAttachments: List<MediaAttachment> = emptyList() // NEW: Media attachments
 )
 
-// UPDATED: Added formattedMessageText support for notifications
+// UPDATED: Added media attachments support for notifications
 data class NotificationMessage(
     val userId: Long,
     val channelName: String,
@@ -23,8 +24,31 @@ data class NotificationMessage(
     val formattedMessageText: String? = null, // Formatted text (MarkdownV2) for rich notifications
     val priority: Int = 0,
     val senderUsername: String? = null,
-    val messageLink: String? = null
+    val messageLink: String? = null,
+    val mediaAttachments: List<MediaAttachment> = emptyList() // NEW: Media attachments
 )
+
+// NEW: Media attachment data model
+data class MediaAttachment(
+    val type: MediaType,
+    val filePath: String, // Local file path in /tmp
+    val originalFileName: String? = null,
+    val fileSize: Long = 0,
+    val mimeType: String? = null,
+    val caption: String? = null, // For photos/videos with captions
+    val width: Int? = null,
+    val height: Int? = null,
+    val duration: Int? = null // For videos/audio
+)
+
+enum class MediaType {
+    PHOTO,
+    VIDEO,
+    DOCUMENT,
+    AUDIO,
+    VOICE,
+    ANIMATION // GIFs
+}
 
 // Keyword processing models (unchanged)
 data class ParsedKeywords(
