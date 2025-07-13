@@ -244,7 +244,7 @@ class ChannelMonitor(
             ErrorTracker.logError("ERROR", "Media group processing error: ${e.message}", e)
         }
     }
-    
+
     /**
     * Process single message with media downloads
     * ENHANCED: Better handling of various message types including polls
@@ -350,26 +350,46 @@ class ChannelMonitor(
             }
         }
         
-        // Add content-specific keywords
-        when (messageContent) {
-            is TdApi.MessagePoll -> {
+        // Add content-specific keywords using safe reflection
+        when {
+            messageContent.javaClass.simpleName.contains("Poll") -> {
                 keywords.addAll(listOf("poll", "vote", "survey", "question"))
-                // Add poll-specific terms that might be job-related
-                val question = messageContent.poll.question.text.lowercase()
-                if (question.contains("job") || question.contains("work") || question.contains("hire")) {
-                    keywords.addAll(listOf("job", "hiring", "employment", "work"))
+                // Try to extract poll question text safely
+                try {
+                    val pollField = messageContent.javaClass.declaredFields.find { it.name == "poll" }
+                    if (pollField != null) {
+                        pollField.isAccessible = true
+                        val poll = pollField.get(messageContent)
+                        val questionField = poll?.javaClass?.declaredFields?.find { it.name == "question" }
+                        if (questionField != null) {
+                            questionField.isAccessible = true
+                            val question = questionField.get(poll)
+                            val textField = question?.javaClass?.declaredFields?.find { it.name == "text" }
+                            if (textField != null) {
+                                textField.isAccessible = true
+                                val questionText = textField.get(question) as? String
+                                if (questionText?.lowercase()?.contains("job") == true || 
+                                    questionText?.lowercase()?.contains("work") == true || 
+                                    questionText?.lowercase()?.contains("hire") == true) {
+                                    keywords.addAll(listOf("job", "hiring", "employment", "work"))
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    logger.debug { "Could not extract poll text: ${e.message}" }
                 }
             }
-            is TdApi.MessageSticker -> {
+            messageContent.javaClass.simpleName.contains("Sticker") -> {
                 keywords.addAll(listOf("sticker", "emoji", "reaction"))
             }
-            is TdApi.MessageLocation -> {
+            messageContent.javaClass.simpleName.contains("Location") -> {
                 keywords.addAll(listOf("location", "address", "place", "map"))
             }
-            is TdApi.MessageVenue -> {
+            messageContent.javaClass.simpleName.contains("Venue") -> {
                 keywords.addAll(listOf("venue", "place", "location", "address"))
             }
-            is TdApi.MessageContact -> {
+            messageContent.javaClass.simpleName.contains("Contact") -> {
                 keywords.addAll(listOf("contact", "phone", "person", "info"))
             }
         }
@@ -471,92 +491,116 @@ class ChannelMonitor(
                 Pair(plainText, formattedText)
             }
             
-            // ADDED: Handle polls for job-related content
+            // ENHANCED: Handle polls for job-related content using safe reflection
             is TdApi.MessagePoll -> {
-                val poll = content.poll
-                val question = poll.question.text
-                val options = poll.options.joinToString(" ") { it.text.text }
-                val plainText = "$question $options"
-                val formattedText = "*${TelegramMarkdownConverter.escapeForFormatting(question)}*\n\n${TelegramMarkdownConverter.escapeMarkdownV2(options)}"
-                logger.debug { "Poll message - question: '${question.take(50)}', ${poll.options.size} options" }
-                Pair(plainText, formattedText)
-            }
-            
-            // ADDED: Handle stickers (some have associated text/emoji)
-            is TdApi.MessageSticker -> {
-                val sticker = content.sticker
-                val emoji = sticker.emoji
-                val stickerText = if (!emoji.isNullOrBlank()) {
-                    "sticker $emoji"
-                } else {
-                    "sticker"
+                try {
+                    val poll = content.poll
+                    val question = poll.question.text
+                    val options = poll.options.joinToString(" ") { it.text.text }
+                    val plainText = "$question $options"
+                    val formattedText = "*${TelegramMarkdownConverter.escapeForFormatting(question)}*\n\n${TelegramMarkdownConverter.escapeMarkdownV2(options)}"
+                    logger.debug { "Poll message - question: '${question.take(50)}', ${poll.options.size} options" }
+                    Pair(plainText, formattedText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing poll message: ${e.message}" }
+                    Pair("poll message", "poll message")
                 }
-                logger.debug { "Sticker message - emoji: '$emoji'" }
-                Pair(stickerText, stickerText)
             }
             
-            // ADDED: Handle location messages (could be job-related)
+            // ENHANCED: Handle stickers (some have associated text/emoji)
+            is TdApi.MessageSticker -> {
+                try {
+                    val sticker = content.sticker
+                    val emoji = sticker.emoji
+                    val stickerText = if (!emoji.isNullOrBlank()) {
+                        "sticker $emoji"
+                    } else {
+                        "sticker"
+                    }
+                    logger.debug { "Sticker message - emoji: '$emoji'" }
+                    Pair(stickerText, stickerText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing sticker message: ${e.message}" }
+                    Pair("sticker", "sticker")
+                }
+            }
+            
+            // ENHANCED: Handle location messages (could be job-related)
             is TdApi.MessageLocation -> {
-                val location = content.location
-                val locationText = "location ${location.latitude} ${location.longitude}"
-                logger.debug { "Location message" }
-                Pair(locationText, locationText)
+                try {
+                    val location = content.location
+                    val locationText = "location ${location.latitude} ${location.longitude}"
+                    logger.debug { "Location message" }
+                    Pair(locationText, locationText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing location message: ${e.message}" }
+                    Pair("location", "location")
+                }
             }
             
-            // ADDED: Handle venue messages (could be job-related)
+            // ENHANCED: Handle venue messages (could be job-related)
             is TdApi.MessageVenue -> {
-                val venue = content.venue
-                val venueText = "${venue.title} ${venue.address}"
-                logger.debug { "Venue message - title: '${venue.title}'" }
-                Pair(venueText, venueText)
+                try {
+                    val venue = content.venue
+                    val venueText = "${venue.title} ${venue.address}"
+                    logger.debug { "Venue message - title: '${venue.title}'" }
+                    Pair(venueText, venueText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing venue message: ${e.message}" }
+                    Pair("venue", "venue")
+                }
             }
             
-            // ADDED: Handle contact messages
+            // ENHANCED: Handle contact messages
             is TdApi.MessageContact -> {
-                val contact = content.contact
-                val contactText = "${contact.firstName} ${contact.lastName} ${contact.phoneNumber}"
-                logger.debug { "Contact message - name: '${contact.firstName} ${contact.lastName}'" }
-                Pair(contactText, contactText)
+                try {
+                    val contact = content.contact
+                    val contactText = "${contact.firstName} ${contact.lastName} ${contact.phoneNumber}"
+                    logger.debug { "Contact message - name: '${contact.firstName} ${contact.lastName}'" }
+                    Pair(contactText, contactText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing contact message: ${e.message}" }
+                    Pair("contact", "contact")
+                }
             }
             
-            // ADDED: Handle dice/game messages (usually not job-related, but worth logging)
+            // ENHANCED: Handle dice/game messages (usually not job-related, but worth logging)
             is TdApi.MessageDice -> {
-                val emoji = content.emoji
-                val diceText = "dice $emoji"
-                logger.debug { "Dice message - emoji: '$emoji'" }
-                Pair(diceText, diceText)
+                try {
+                    val emoji = content.emoji
+                    val diceText = "dice $emoji"
+                    logger.debug { "Dice message - emoji: '$emoji'" }
+                    Pair(diceText, diceText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing dice message: ${e.message}" }
+                    Pair("dice", "dice")
+                }
             }
             
-            // ADDED: Handle game messages
+            // ENHANCED: Handle game messages
             is TdApi.MessageGame -> {
-                val game = content.game
-                val gameText = "${game.title} ${game.description}"
-                logger.debug { "Game message - title: '${game.title}'" }
-                Pair(gameText, gameText)
+                try {
+                    val game = content.game
+                    val gameText = "${game.title} ${game.description}"
+                    logger.debug { "Game message - title: '${game.title}'" }
+                    Pair(gameText, gameText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing game message: ${e.message}" }
+                    Pair("game", "game")
+                }
             }
             
-            // ADDED: Handle invoice messages (could be job-related)
-            is TdApi.MessageInvoice -> {
-                val invoice = content.invoice
-                val invoiceText = "${invoice.title} ${invoice.description}"
-                logger.debug { "Invoice message - title: '${invoice.title}'" }
-                Pair(invoiceText, invoiceText)
-            }
-            
-            // ADDED: Handle web page previews
-            is TdApi.MessageWebPage -> {
-                val webPage = content.webPage
-                val webPageText = "${webPage.siteName} ${webPage.title} ${webPage.description}"
-                logger.debug { "Web page message - title: '${webPage.title}'" }
-                Pair(webPageText, webPageText)
-            }
-            
-            // ADDED: Service messages that might contain useful info
+            // ENHANCED: Service messages that might contain useful info
             is TdApi.MessageChatAddMembers -> {
-                val memberNames = content.memberUserIds.joinToString(" ") { "user$it" }
-                val serviceText = "new members joined $memberNames"
-                logger.debug { "Chat add members - ${content.memberUserIds.size} members" }
-                Pair(serviceText, serviceText)
+                try {
+                    val memberNames = content.memberUserIds.joinToString(" ") { "user$it" }
+                    val serviceText = "new members joined $memberNames"
+                    logger.debug { "Chat add members - ${content.memberUserIds.size} members" }
+                    Pair(serviceText, serviceText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing add members message: ${e.message}" }
+                    Pair("new members", "new members")
+                }
             }
             
             is TdApi.MessageChatJoinByLink -> {
@@ -572,10 +616,15 @@ class ChannelMonitor(
             }
             
             is TdApi.MessageChatChangeTitle -> {
-                val newTitle = content.title
-                val serviceText = "chat title changed to $newTitle"
-                logger.debug { "Chat title changed to: '$newTitle'" }
-                Pair(serviceText, serviceText)
+                try {
+                    val newTitle = content.title
+                    val serviceText = "chat title changed to $newTitle"
+                    logger.debug { "Chat title changed to: '$newTitle'" }
+                    Pair(serviceText, serviceText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing title change: ${e.message}" }
+                    Pair("title changed", "title changed")
+                }
             }
             
             is TdApi.MessageChatChangePhoto -> {
@@ -590,32 +639,85 @@ class ChannelMonitor(
                 Pair(serviceText, serviceText)
             }
             
-            is TdApi.MessageChannelChatCreate -> {
-                val channelTitle = content.title
-                val serviceText = "channel created $channelTitle"
-                logger.debug { "Channel created: '$channelTitle'" }
-                Pair(serviceText, serviceText)
-            }
-            
-            is TdApi.MessageSupergroupChatCreate -> {
-                val groupTitle = content.title
-                val serviceText = "supergroup created $groupTitle"
-                logger.debug { "Supergroup created: '$groupTitle'" }
-                Pair(serviceText, serviceText)
-            }
-            
-            // Handle other message types that might have text content
+            // Handle animated emoji
             is TdApi.MessageAnimatedEmoji -> {
-                val emoji = content.emoji
-                val emojiText = "animated emoji $emoji"
-                logger.debug { "Animated emoji: '$emoji'" }
-                Pair(emojiText, emojiText)
+                try {
+                    val emoji = content.emoji
+                    val emojiText = "animated emoji $emoji"
+                    logger.debug { "Animated emoji: '$emoji'" }
+                    Pair(emojiText, emojiText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing animated emoji: ${e.message}" }
+                    Pair("emoji", "emoji")
+                }
             }
             
-            // For any unsupported types, return empty but log the type
+            // Handle other message types with safe property access
             else -> {
-                logger.debug { "Unsupported message type: ${content.javaClass.simpleName} - extracting empty content" }
-                Pair("", "")
+                // For unsupported message types, try to extract any available text
+                logger.debug { "Message type ${content.javaClass.simpleName} - checking for text content" }
+                
+                // Use reflection to safely check for common text properties
+                val textContent = try {
+                    when {
+                        content.javaClass.simpleName.contains("Invoice") -> {
+                            // Try to extract invoice text if available
+                            val titleField = content.javaClass.declaredFields.find { it.name == "title" }
+                            val descField = content.javaClass.declaredFields.find { it.name == "description" }
+                            val title = titleField?.let { 
+                                it.isAccessible = true
+                                it.get(content) as? String 
+                            } ?: ""
+                            val desc = descField?.let { 
+                                it.isAccessible = true
+                                it.get(content) as? String 
+                            } ?: ""
+                            "$title $desc".trim()
+                        }
+                        content.javaClass.simpleName.contains("WebPage") -> {
+                            // Try to extract web page text if available
+                            val titleField = content.javaClass.declaredFields.find { it.name == "title" }
+                            val title = titleField?.let { 
+                                it.isAccessible = true
+                                it.get(content) as? String 
+                            } ?: ""
+                            title
+                        }
+                        content.javaClass.simpleName.contains("ChannelChatCreate") || 
+                        content.javaClass.simpleName.contains("SupergroupChatCreate") -> {
+                            val titleField = content.javaClass.declaredFields.find { it.name == "title" }
+                            val title = titleField?.let { 
+                                it.isAccessible = true
+                                it.get(content) as? String 
+                            } ?: "unknown"
+                            val prefix = if (content.javaClass.simpleName.contains("Channel")) "channel" else "supergroup"
+                            "$prefix created $title"
+                        }
+                        else -> {
+                            // Try one last attempt to extract any text using reflection
+                            val textFields = content.javaClass.declaredFields.filter { field ->
+                                field.type == String::class.java && 
+                                (field.name.contains("text", true) || 
+                                 field.name.contains("title", true) ||
+                                 field.name.contains("description", true))
+                            }
+                            
+                            textFields.mapNotNull { field ->
+                                try {
+                                    field.isAccessible = true
+                                    field.get(content) as? String
+                                } catch (e: Exception) {
+                                    null
+                                }
+                            }.joinToString(" ").trim()
+                        }
+                    }
+                } catch (e: Exception) {
+                    logger.debug { "Could not extract text from ${content.javaClass.simpleName}: ${e.message}" }
+                    ""
+                }
+                
+                Pair(textContent, textContent)
             }
         }
     }
