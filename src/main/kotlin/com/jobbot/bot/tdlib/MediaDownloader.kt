@@ -8,12 +8,14 @@ import kotlinx.coroutines.*
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 import java.io.File
+import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
+import java.text.Normalizer
 import java.util.*
 
 /**
  * Downloads media attachments from TDLib messages
- * FOCUSED FIX: Handle Unicode filename encoding mismatch between TDLib and filesystem
+ * ENHANCED: Proper UTF-8 filename decoding to handle Unicode filename encoding mismatch
  */
 class MediaDownloader {
     private val logger = getLogger("MediaDownloader")
@@ -281,7 +283,7 @@ class MediaDownloader {
     }
     
     /**
-     * FOCUSED FIX: Download file with proper verification and retry logic
+     * Download file with proper verification and retry logic
      */
     private suspend fun downloadFile(
         client: Client, 
@@ -296,7 +298,7 @@ class MediaDownloader {
             
             logger.debug { "Starting download: fileId=$fileId, targetPath=$targetPath" }
             
-            // ENHANCED: Force download with higher priority and offset 0
+            // Force download with higher priority and offset 0
             client.send(TdApi.DownloadFile(fileId, 32, 0, 0, true)) { result ->
                 when (result) {
                     is TdApi.File -> {
@@ -315,7 +317,7 @@ class MediaDownloader {
                 }
             }
             
-            // ENHANCED: More aggressive polling with progress tracking
+            // Aggressive polling with progress tracking
             val pollJob = launch {
                 var pollCount = 0
                 var lastProgress = 0L
@@ -382,7 +384,7 @@ class MediaDownloader {
     }
     
     /**
-     * FOCUSED FIX: Handle completed download with strict verification
+     * ENHANCED: Handle completed download with proper UTF-8 filename matching
      */
     private fun handleCompletedDownload(
         file: TdApi.File,
@@ -415,6 +417,10 @@ class MediaDownloader {
             
             logger.debug { "TDLib reports file at: '$tdlibSourcePath' (verified size: $expectedSize bytes)" }
             
+            // Extract expected filename from TDLib path
+            val expectedFilename = File(tdlibSourcePath).name
+            logger.debug { "Expected filename from TDLib: '$expectedFilename'" }
+            
             val parentDir = File(tdlibSourcePath).parentFile
             if (parentDir?.exists() != true) {
                 logger.warn { "Parent directory doesn't exist: ${parentDir?.absolutePath}" }
@@ -422,55 +428,218 @@ class MediaDownloader {
                 return
             }
             
-            logger.debug { "Listing files in directory: ${parentDir.absolutePath}" }
+            logger.debug { "Searching in directory: ${parentDir.absolutePath}" }
             
-            // Find file that matches the expected size AND is recent AND is not empty
-            val now = System.currentTimeMillis()
-            val candidateFiles = parentDir.listFiles()
-                ?.filter { 
-                    it.isFile && 
-                    it.length() > 0 &&  // MUST have content
-                    it.canRead() &&
-                    it.length() == expectedSize &&  // EXACT size match
-                    (now - it.lastModified()) < 300000  // Modified within last 5 minutes
-                }
-                ?.sortedByDescending { it.lastModified() }
+            // ENHANCED: Find file using multiple UTF-8 matching strategies
+            val matchingFile = findFileWithProperUtf8Matching(parentDir, expectedFilename, expectedSize)
             
-            if (candidateFiles.isNullOrEmpty()) {
-                logger.warn { "No files found matching size $expectedSize in directory: ${parentDir.absolutePath}" }
+            if (matchingFile != null) {
+                logger.info { "Found matching file: ${getSafeFilename(matchingFile)} (${matchingFile.length()} bytes)" }
+                copyFileToTarget(matchingFile, targetPath, deferred)
+            } else {
+                logger.warn { "Could not find matching file in directory" }
                 
                 // Debug: show what files are actually there
-                val allFiles = parentDir.listFiles()
-                logger.debug { "Directory contains ${allFiles?.size ?: 0} files:" }
-                allFiles?.forEach { file ->
-                    val age = (now - file.lastModified()) / 1000
-                    logger.debug { "  ${file.name}: ${file.length()} bytes (age: ${age}s)" }
-                }
-                
-                // FALLBACK: Try to find ANY file with the correct size (ignore timestamp)
-                val sizeMatcher = allFiles?.find { 
-                    it.isFile && it.length() == expectedSize && it.length() > 0 && it.canRead()
-                }
-                
-                if (sizeMatcher != null) {
-                    logger.info { "Found size-matching file ignoring timestamp: ${sizeMatcher.name}" }
-                    copyFileToTarget(sizeMatcher, targetPath, deferred)
-                    return
-                } else {
-                    logger.warn { "No files with correct size $expectedSize found at all" }
-                    deferred.complete(null)
-                    return
-                }
+                logDirectoryContents(parentDir, expectedSize)
+                deferred.complete(null)
             }
-            
-            val actualFile = candidateFiles.first()
-            logger.info { "Found matching file: ${actualFile.name} (${actualFile.length()} bytes)" }
-            
-            copyFileToTarget(actualFile, targetPath, deferred)
             
         } catch (e: Exception) {
             logger.error(e) { "Error handling completed download" }
             deferred.complete(null)
+        }
+    }
+    
+    /**
+     * Find file using multiple UTF-8 matching strategies
+     */
+    private fun findFileWithProperUtf8Matching(
+        directory: File,
+        expectedFilename: String,
+        expectedSize: Long
+    ): File? {
+        val allFiles = directory.listFiles() ?: return null
+        val now = System.currentTimeMillis()
+        
+        // Filter to recent files with correct size first (basic validation)
+        val candidates = allFiles.filter { file ->
+            file.isFile && 
+            file.length() == expectedSize &&
+            file.length() > 0 &&
+            file.canRead() &&
+            (now - file.lastModified()) < 300000  // Within last 5 minutes
+        }
+        
+        if (candidates.isEmpty()) {
+            logger.debug { "No candidates found with size $expectedSize in last 5 minutes" }
+            return null
+        }
+        
+        logger.debug { "Found ${candidates.size} size-matching candidates, trying filename matching..." }
+        
+        // Strategy 1: Direct filename match (handles ASCII and properly encoded UTF-8)
+        candidates.forEach { file ->
+            if (file.name == expectedFilename) {
+                logger.debug { "✅ Direct filename match: ${getSafeFilename(file)}" }
+                return file
+            }
+        }
+        
+        // Strategy 2: Normalized filename comparison (handles different Unicode normalizations)
+        val normalizedExpected = normalizeFilename(expectedFilename)
+        candidates.forEach { file ->
+            val normalizedActual = normalizeFilename(file.name)
+            if (normalizedActual == normalizedExpected) {
+                logger.debug { "✅ Normalized filename match: ${getSafeFilename(file)}" }
+                return file
+            }
+        }
+        
+        // Strategy 3: UTF-8 byte-level comparison
+        val expectedBytes = expectedFilename.toByteArray(StandardCharsets.UTF_8)
+        candidates.forEach { file ->
+            try {
+                val actualBytes = file.name.toByteArray(StandardCharsets.UTF_8)
+                if (actualBytes.contentEquals(expectedBytes)) {
+                    logger.debug { "✅ UTF-8 byte-level match: ${getSafeFilename(file)}" }
+                    return file
+                }
+            } catch (e: Exception) {
+                logger.debug { "Error in UTF-8 comparison for file: ${getSafeFilename(file)}" }
+            }
+        }
+        
+        // Strategy 4: Try different charset interpretations
+        candidates.forEach { file ->
+            if (compareWithCharsetVariants(file.name, expectedFilename)) {
+                logger.debug { "✅ Charset variant match: ${getSafeFilename(file)}" }
+                return file
+            }
+        }
+        
+        // Strategy 5: Partial filename matching (for cases where encoding really mangles the name)
+        // Extract file extension and try to match by size + extension + recency
+        val expectedExtension = getFileExtension(expectedFilename)
+        if (expectedExtension != null) {
+            val extensionMatches = candidates.filter { file ->
+                getFileExtension(file.name) == expectedExtension
+            }.sortedByDescending { it.lastModified() }
+            
+            if (extensionMatches.size == 1) {
+                logger.debug { "✅ Single extension + size match: ${getSafeFilename(extensionMatches.first())}" }
+                return extensionMatches.first()
+            }
+        }
+        
+        // Strategy 6: Last resort - most recent file with correct size
+        val mostRecent = candidates.maxByOrNull { it.lastModified() }
+        if (mostRecent != null) {
+            logger.warn { "⚠️ Using most recent size match as fallback: ${getSafeFilename(mostRecent)}" }
+            return mostRecent
+        }
+        
+        return null
+    }
+    
+    /**
+     * Normalize filename for comparison (handles Unicode normalization forms)
+     */
+    private fun normalizeFilename(filename: String): String {
+        return try {
+            Normalizer.normalize(filename, Normalizer.Form.NFC)
+                .lowercase()
+                .trim()
+        } catch (e: Exception) {
+            logger.debug { "Error normalizing filename: $filename" }
+            filename.lowercase().trim()
+        }
+    }
+    
+    /**
+     * Compare filenames using different charset interpretations
+     */
+    private fun compareWithCharsetVariants(actualFilename: String, expectedFilename: String): Boolean {
+        val charsets = listOf(
+            StandardCharsets.UTF_8,
+            StandardCharsets.ISO_8859_1,
+            Charset.forName("Windows-1251"), // Common for Cyrillic
+            Charset.forName("UTF-16"),
+            Charset.forName("UTF-16LE"),
+            Charset.forName("UTF-16BE")
+        )
+        
+        return charsets.any { charset ->
+            try {
+                // Try interpreting actual filename as bytes in this charset, then decode as UTF-8
+                val reinterpreted = String(actualFilename.toByteArray(StandardCharsets.ISO_8859_1), charset)
+                reinterpreted == expectedFilename
+            } catch (e: Exception) {
+                false
+            }
+        }
+    }
+    
+    /**
+     * Get file extension safely
+     */
+    private fun getFileExtension(filename: String): String? {
+        return try {
+            val lastDot = filename.lastIndexOf('.')
+            if (lastDot > 0 && lastDot < filename.length - 1) {
+                filename.substring(lastDot + 1).lowercase()
+            } else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+    
+    /**
+     * Get filename safely for logging (handles encoding errors)
+     */
+    private fun getSafeFilename(file: File): String {
+        return try {
+            file.name
+        } catch (e: Exception) {
+            try {
+                // Try to get a safe representation
+                val bytes = file.name.toByteArray(StandardCharsets.ISO_8859_1)
+                String(bytes, StandardCharsets.UTF_8)
+            } catch (e2: Exception) {
+                "<encoding-error-${file.length()}bytes>"
+            }
+        }
+    }
+    
+    /**
+     * Log directory contents with proper UTF-8 handling
+     */
+    private fun logDirectoryContents(directory: File, expectedSize: Long) {
+        try {
+            val allFiles = directory.listFiles()
+            logger.debug { "Directory contains ${allFiles?.size ?: 0} files:" }
+            
+            allFiles?.forEachIndexed { index, file ->
+                val age = (System.currentTimeMillis() - file.lastModified()) / 1000
+                val sizeMatch = if (file.length() == expectedSize) "✅" else "❌"
+                val safeFileName = getSafeFilename(file)
+                
+                // Also show raw bytes for debugging
+                val rawBytes = try {
+                    file.name.toByteArray(StandardCharsets.ISO_8859_1)
+                        .joinToString("") { "%02X".format(it) }
+                        .take(40) // Limit length
+                } catch (e: Exception) {
+                    "encoding-error"
+                }
+                
+                logger.debug { 
+                    "  [$index] $safeFileName: ${file.length()} bytes (age: ${age}s) $sizeMatch" +
+                    if (logger.isDebugEnabled) " [bytes: $rawBytes...]" else ""
+                }
+            }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error logging directory contents" }
         }
     }
     
@@ -484,6 +653,11 @@ class MediaDownloader {
     ) {
         try {
             val targetFile = File(targetPath)
+            
+            // Ensure target directory exists
+            targetFile.parentFile?.mkdirs()
+            
+            // Copy the file
             sourceFile.copyTo(targetFile, overwrite = true)
             
             // Verify copy
