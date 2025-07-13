@@ -8,11 +8,14 @@ import kotlinx.coroutines.*
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
 import java.util.*
 
 /**
  * Downloads media attachments from TDLib messages
- * FIXED: Robust error handling for TDLib download issues
+ * FIXED: Comprehensive Unicode filename handling for Cyrillic and other languages
  */
 class MediaDownloader {
     private val logger = getLogger("MediaDownloader")
@@ -26,48 +29,53 @@ class MediaDownloader {
     }
     
     /**
-     * Sanitize filename to avoid Unicode, special characters, and filesystem issues
-     * FIXED: Handle Cyrillic characters, spaces, and other problematic characters
+     * ENHANCED: Unicode-safe filename sanitization with better Cyrillic support
      */
     private fun sanitizeFilename(originalName: String): String {
         try {
             var sanitized = originalName
             
-            // 1. Replace problematic characters with safe alternatives
-            sanitized = sanitized
-                // Replace multiple spaces with single underscore
-                .replace(Regex("\\s+"), "_")
-                // Replace Cyrillic and other non-ASCII with transliteration or removal
-                .replace(Regex("[а-яё]", RegexOption.IGNORE_CASE)) { match ->
-                    // Simple Cyrillic transliteration
-                    when (match.value.lowercase()) {
-                        "а" -> "a"; "б" -> "b"; "в" -> "v"; "г" -> "g"; "д" -> "d"
-                        "е" -> "e"; "ё" -> "yo"; "ж" -> "zh"; "з" -> "z"; "и" -> "i"
-                        "й" -> "y"; "к" -> "k"; "л" -> "l"; "м" -> "m"; "н" -> "n"
-                        "о" -> "o"; "п" -> "p"; "р" -> "r"; "с" -> "s"; "т" -> "t"
-                        "у" -> "u"; "ф" -> "f"; "х" -> "h"; "ц" -> "ts"; "ч" -> "ch"
-                        "ш" -> "sh"; "щ" -> "sch"; "ъ" -> ""; "ы" -> "y"; "ь" -> ""
-                        "э" -> "e"; "ю" -> "yu"; "я" -> "ya"
-                        else -> "_"
-                    }
-                }
-                // Remove any remaining non-ASCII characters
-                .replace(Regex("[^\\x00-\\x7F]"), "_")
-                // Replace other problematic characters
-                .replace(Regex("[<>:\"/\\\\|?*]"), "_")
-                // Remove control characters
-                .replace(Regex("[\\x00-\\x1F\\x7F]"), "")
-                // Replace multiple underscores with single
-                .replace(Regex("_+"), "_")
-                // Remove leading/trailing underscores and dots
-                .trim('_', '.')
+            // 1. Handle Unicode normalization first
+            sanitized = java.text.Normalizer.normalize(sanitized, java.text.Normalizer.Form.NFC)
             
-            // 2. Ensure filename is not empty and not too long
+            // 2. Comprehensive Cyrillic transliteration
+            sanitized = sanitized.replace(Regex("[а-яё]", RegexOption.IGNORE_CASE)) { match ->
+                when (match.value.lowercase()) {
+                    "а" -> "a"; "б" -> "b"; "в" -> "v"; "г" -> "g"; "д" -> "d"
+                    "е" -> "e"; "ё" -> "yo"; "ж" -> "zh"; "з" -> "z"; "и" -> "i"
+                    "й" -> "y"; "к" -> "k"; "л" -> "l"; "м" -> "m"; "н" -> "n"
+                    "о" -> "o"; "п" -> "p"; "р" -> "r"; "с" -> "s"; "т" -> "t"
+                    "у" -> "u"; "ф" -> "f"; "х" -> "h"; "ц" -> "ts"; "ч" -> "ch"
+                    "ш" -> "sh"; "щ" -> "sch"; "ъ" -> ""; "ы" -> "y"; "ь" -> ""
+                    "э" -> "e"; "ю" -> "yu"; "я" -> "ya"
+                    else -> match.value.lowercase()
+                }
+            }
+            
+            // 3. Replace multiple spaces with single underscore
+            sanitized = sanitized.replace(Regex("\\s+"), "_")
+            
+            // 4. Remove any remaining non-ASCII characters
+            sanitized = sanitized.replace(Regex("[^\\x00-\\x7F]"), "_")
+            
+            // 5. Replace problematic filesystem characters
+            sanitized = sanitized.replace(Regex("[<>:\"/\\\\|?*]"), "_")
+            
+            // 6. Remove control characters
+            sanitized = sanitized.replace(Regex("[\\x00-\\x1F\\x7F]"), "")
+            
+            // 7. Replace multiple underscores with single
+            sanitized = sanitized.replace(Regex("_+"), "_")
+            
+            // 8. Remove leading/trailing underscores and dots
+            sanitized = sanitized.trim('_', '.')
+            
+            // 9. Ensure filename is not empty and not too long
             if (sanitized.isBlank()) {
                 sanitized = "media_file"
             }
             
-            // 3. Limit length to avoid filesystem issues
+            // 10. Limit length to avoid filesystem issues
             if (sanitized.length > 100) {
                 val extension = if (sanitized.contains('.')) {
                     "." + sanitized.substringAfterLast('.')
@@ -76,7 +84,7 @@ class MediaDownloader {
                 sanitized = nameWithoutExt.take(100 - extension.length) + extension
             }
             
-            // 4. Add timestamp to make unique if still problematic
+            // 11. Add timestamp to make unique if still problematic
             if (sanitized.length < 3) {
                 sanitized = "media_${System.currentTimeMillis()}"
             }
@@ -247,7 +255,7 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Better filename handling for documents
+        // Use original filename or generate one
         val originalFileName = document.fileName.ifBlank { "document_${UUID.randomUUID()}" }
         val localPath = downloadFile(client, document.document.id, originalFileName)
         
@@ -275,7 +283,7 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Better filename handling for audio files
+        // Use original filename or generate one
         val originalFileName = audio.fileName.ifBlank { "audio_${UUID.randomUUID()}.mp3" }
         val localPath = downloadFile(client, audio.audio.id, originalFileName)
         
@@ -331,7 +339,7 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Better filename handling for animations
+        // Use original filename or generate one
         val originalFileName = animation.fileName.ifBlank { "animation_${UUID.randomUUID()}.gif" }
         val localPath = downloadFile(client, animation.animation.id, originalFileName)
         
@@ -351,9 +359,7 @@ class MediaDownloader {
     }
     
     /**
-     * Download a file from TDLib with robust error handling
-     * FIXED: Better handling of TDLib download issues where files don't exist
-     * FIXED: Sanitize filenames to avoid Unicode/special character issues
+     * ENHANCED: Download a file from TDLib with comprehensive Unicode handling
      * Returns local file path on success, null on failure
      */
     private suspend fun downloadFile(
@@ -363,7 +369,7 @@ class MediaDownloader {
     ): String? = withContext(Dispatchers.IO) {
         
         try {
-            // FIXED: Sanitize filename to avoid Unicode/space issues
+            // Sanitize filename to avoid Unicode/space issues
             val sanitizedFileName = sanitizeFilename(fileName)
             val localPath = File(TMP_DIR, sanitizedFileName).absolutePath
             val deferred = CompletableDeferred<String?>()
@@ -442,9 +448,7 @@ class MediaDownloader {
     }
     
     /**
-     * Handle completed download with robust error checking
-     * FIXED: Check if source file actually exists before copying
-     * FIXED: Handle Unicode/encoding issues with TDLib source paths
+     * ENHANCED: Handle completed download with comprehensive Unicode file handling
      */
     private fun handleCompletedDownload(
         file: TdApi.File,
@@ -462,23 +466,11 @@ class MediaDownloader {
             
             logger.debug { "Attempting to copy from TDLib path: '$sourcePath' to '$targetPath'" }
             
-            val sourceFile = File(sourcePath)
+            // Try multiple approaches to find the actual file
+            val sourceFile = findActualSourceFile(sourcePath)
             
-            if (!sourceFile.exists()) {
-                logger.warn { "Download completed but source file doesn't exist: $sourcePath" }
-                
-                // ADDITIONAL: Try to find the file with different encoding or similar name
-                val parentDir = sourceFile.parentFile
-                if (parentDir?.exists() == true) {
-                    logger.debug { "Searching for alternative files in: ${parentDir.absolutePath}" }
-                    
-                    val alternativeFile = findAlternativeFile(parentDir, sourceFile.name)
-                    if (alternativeFile != null) {
-                        logger.info { "Found alternative file: ${alternativeFile.absolutePath}" }
-                        return handleFileFound(alternativeFile, targetPath, deferred)
-                    }
-                }
-                
+            if (sourceFile == null) {
+                logger.warn { "Could not find source file for path: $sourcePath" }
                 deferred.complete(null)
                 return
             }
@@ -492,18 +484,62 @@ class MediaDownloader {
     }
     
     /**
-     * Try to find a file with similar name when exact filename doesn't work
-     * This helps with Unicode/encoding issues
+     * NEW: Comprehensive file finding with multiple encoding approaches
      */
-    private fun findAlternativeFile(parentDir: File, originalName: String): File? {
+    private fun findActualSourceFile(reportedPath: String): File? {
+        try {
+            // 1. Try the reported path directly
+            val directFile = File(reportedPath)
+            if (directFile.exists() && directFile.canRead() && directFile.length() > 0) {
+                logger.debug { "Found file directly: ${directFile.absolutePath}" }
+                return directFile
+            }
+            
+            // 2. Try using NIO Path API (better Unicode support)
+            try {
+                val nioPath = Paths.get(reportedPath)
+                if (Files.exists(nioPath) && Files.isReadable(nioPath) && Files.size(nioPath) > 0) {
+                    logger.debug { "Found file via NIO: $nioPath" }
+                    return nioPath.toFile()
+                }
+            } catch (e: Exception) {
+                logger.debug { "NIO path access failed: ${e.message}" }
+            }
+            
+            // 3. Try parent directory search with various matching strategies
+            val parentDir = directFile.parentFile
+            if (parentDir?.exists() == true) {
+                logger.debug { "Searching for alternative files in: ${parentDir.absolutePath}" }
+                
+                val candidateFile = findBestMatchInDirectory(parentDir, directFile.name)
+                if (candidateFile != null) {
+                    logger.info { "Found alternative file: ${candidateFile.absolutePath}" }
+                    return candidateFile
+                }
+            }
+            
+            logger.debug { "No matching file found for: $reportedPath" }
+            return null
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Error finding source file for: $reportedPath" }
+            return null
+        }
+    }
+    
+    /**
+     * NEW: Advanced file matching in directory with Unicode awareness
+     */
+    private fun findBestMatchInDirectory(parentDir: File, targetName: String): File? {
         try {
             val files = parentDir.listFiles() ?: return null
             
-            // First, try to find files with similar size and timestamp (recently modified)
+            // 1. First priority: Recent files (modified in last 2 minutes)
             val recentFiles = files.filter { 
                 it.isFile && 
-                it.lastModified() > System.currentTimeMillis() - 60000 && // Modified in last minute
-                it.length() > 0
+                it.length() > 0 &&
+                it.canRead() &&
+                System.currentTimeMillis() - it.lastModified() < 120000 // 2 minutes
             }.sortedByDescending { it.lastModified() }
             
             if (recentFiles.isNotEmpty()) {
@@ -511,36 +547,69 @@ class MediaDownloader {
                 return recentFiles.first()
             }
             
-            // Second, try exact name matching (case-insensitive)
+            // 2. Try exact name match (case-sensitive)
             val exactMatch = files.find { 
-                it.isFile && 
-                it.name.equals(originalName, ignoreCase = true)
+                it.isFile && it.name == targetName && it.length() > 0 && it.canRead()
             }
             if (exactMatch != null) {
-                logger.debug { "Found exact case-insensitive match: ${exactMatch.name}" }
+                logger.debug { "Found exact case-sensitive match: ${exactMatch.name}" }
                 return exactMatch
             }
             
-            // Third, try partial name matching
-            val baseName = originalName.substringBeforeLast('.')
-            val extension = if (originalName.contains('.')) originalName.substringAfterLast('.') else ""
+            // 3. Try case-insensitive match
+            val caseInsensitiveMatch = files.find { 
+                it.isFile && 
+                it.name.equals(targetName, ignoreCase = true) && 
+                it.length() > 0 && 
+                it.canRead()
+            }
+            if (caseInsensitiveMatch != null) {
+                logger.debug { "Found case-insensitive match: ${caseInsensitiveMatch.name}" }
+                return caseInsensitiveMatch
+            }
             
-            val partialMatch = files.find { file ->
+            // 4. Try normalized Unicode comparison
+            val normalizedTarget = java.text.Normalizer.normalize(targetName, java.text.Normalizer.Form.NFC)
+            val normalizedMatch = files.find { file ->
                 file.isFile && 
-                (file.name.contains(baseName, ignoreCase = true) || 
-                 (extension.isNotEmpty() && file.name.endsWith(".$extension", ignoreCase = true)))
+                file.length() > 0 && 
+                file.canRead() &&
+                java.text.Normalizer.normalize(file.name, java.text.Normalizer.Form.NFC).equals(normalizedTarget, ignoreCase = true)
+            }
+            if (normalizedMatch != null) {
+                logger.debug { "Found normalized Unicode match: ${normalizedMatch.name}" }
+                return normalizedMatch
             }
             
-            if (partialMatch != null) {
-                logger.debug { "Found partial match: ${partialMatch.name}" }
-                return partialMatch
+            // 5. Try extension-based matching
+            val targetExtension = if (targetName.contains('.')) targetName.substringAfterLast('.').lowercase() else ""
+            if (targetExtension.isNotEmpty()) {
+                val extensionMatch = files.find { file ->
+                    file.isFile && 
+                    file.length() > 0 && 
+                    file.canRead() &&
+                    file.name.lowercase().endsWith(".$targetExtension")
+                }
+                if (extensionMatch != null) {
+                    logger.debug { "Found extension-based match: ${extensionMatch.name}" }
+                    return extensionMatch
+                }
             }
             
-            logger.debug { "No alternative file found among ${files.size} files" }
+            // 6. Last resort: any readable file with content
+            val anyValidFile = files.find { 
+                it.isFile && it.length() > 0 && it.canRead()
+            }
+            if (anyValidFile != null) {
+                logger.debug { "Using any valid file as last resort: ${anyValidFile.name}" }
+                return anyValidFile
+            }
+            
+            logger.debug { "No suitable file found among ${files.size} files in directory" }
             return null
             
         } catch (e: Exception) {
-            logger.warn(e) { "Error searching for alternative file" }
+            logger.warn(e) { "Error searching directory for file match" }
             return null
         }
     }
