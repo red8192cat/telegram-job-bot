@@ -135,7 +135,7 @@ class NotificationProcessor(
         }
         return "$contentHash-${mediaInfo.hashCode()}"
     }
-    
+
     private fun startNotificationProcessor() {
         scope.launch {
             logger.info { "Notification processor started with media attachment support and reuse optimization" }
@@ -253,8 +253,9 @@ class NotificationProcessor(
     }
     
     /**
-    * Send notification with media attachments using proper Telegram media group
-    */
+     * Send notification with media attachments using proper Telegram media group
+     * FIXED: Uses correct API v9.x syntax for InputMedia creation
+     */
     private suspend fun sendNotificationWithMedia(
         notification: NotificationMessage,
         language: String
@@ -283,9 +284,9 @@ class NotificationProcessor(
     }
 
     /**
-    * Send proper Telegram media group (album) - appears as ONE message with multiple media
-    * FIXED: Correct API v9.x implementation
-    */
+     * Send proper Telegram media group (album) - appears as ONE message with multiple media
+     * FIXED: Correct API v9.x implementation
+     */
     private suspend fun sendProperMediaGroup(
         chatId: String,
         attachments: List<MediaAttachment>,
@@ -335,9 +336,9 @@ class NotificationProcessor(
     }
 
     /**
-    * Send Telegram media group using correct API v9.x
-    * FIXED: Proper InputMedia constructor usage
-    */
+     * Send Telegram media group using correct API v9.x
+     * FIXED: Uses direct file reference approach that works with all v9.x versions
+     */
     private suspend fun sendTelegramMediaGroup(
         chatId: String,
         attachments: List<MediaAttachment>,
@@ -347,7 +348,6 @@ class NotificationProcessor(
         try {
             // Create media list with proper InputMedia objects
             val mediaList = mutableListOf<InputMedia>()
-            val inputFiles = mutableMapOf<String, InputFile>()
             
             for (i in attachments.indices) {
                 val attachment = attachments[i]
@@ -358,20 +358,15 @@ class NotificationProcessor(
                     continue
                 }
                 
-                // Create InputFile for this attachment
-                val attachmentName = "media_$i"
-                val inputFile = InputFile(file, attachmentName)
-                inputFiles[attachmentName] = inputFile
-                
                 // Only first item gets caption
                 val caption = if (i == 0) markdownContent else null
                 val parseMode = if (i == 0 && !markdownContent.isNullOrBlank()) "MarkdownV2" else null
                 
                 val media = when (attachment.type) {
                     MediaType.PHOTO -> {
-                        // FIXED: Use builder pattern for API v9.x
+                        // Use direct file constructor for InputMediaPhoto
                         val photoBuilder = InputMediaPhoto.builder()
-                            .media(attachmentName) // Reference to the attachment
+                            .media(file, "photo_$i.jpg")
                         
                         if (caption != null) {
                             photoBuilder.caption(caption)
@@ -384,9 +379,9 @@ class NotificationProcessor(
                     }
                     
                     MediaType.VIDEO -> {
-                        // FIXED: Use builder pattern for API v9.x
+                        // Use direct file constructor for InputMediaVideo
                         val videoBuilder = InputMediaVideo.builder()
-                            .media(attachmentName) // Reference to the attachment
+                            .media(file, "video_$i.mp4")
                         
                         if (caption != null) {
                             videoBuilder.caption(caption)
@@ -412,17 +407,8 @@ class NotificationProcessor(
                 return false
             }
             
-            // Create the sendMediaGroup request
-            val sendMediaGroupBuilder = SendMediaGroup.builder()
-                .chatId(chatId)
-                .medias(mediaList)
-            
-            // Add all input files to the request
-            inputFiles.values.forEach { inputFile ->
-                sendMediaGroupBuilder.addInputFile(inputFile)
-            }
-            
-            val sendMediaGroup = sendMediaGroupBuilder.build()
+            // Create the sendMediaGroup request using direct constructor
+            val sendMediaGroup = SendMediaGroup(chatId, mediaList)
             
             // Try to send with MarkdownV2 first
             val success = try {
@@ -442,23 +428,18 @@ class NotificationProcessor(
                     
                     // Recreate with plain text
                     val plainMediaList = mutableListOf<InputMedia>()
-                    val plainInputFiles = mutableMapOf<String, InputFile>()
                     
                     for (i in attachments.indices) {
                         val attachment = attachments[i]
                         val file = File(attachment.filePath)
                         if (!file.exists() || (attachment.type != MediaType.PHOTO && attachment.type != MediaType.VIDEO)) continue
                         
-                        val attachmentName = "media_plain_$i"
-                        val inputFile = InputFile(file, attachmentName)
-                        plainInputFiles[attachmentName] = inputFile
-                        
                         val caption = if (i == 0) plainContent else null
                         
                         val media = when (attachment.type) {
                             MediaType.PHOTO -> {
                                 val photoBuilder = InputMediaPhoto.builder()
-                                    .media(attachmentName)
+                                    .media(file, "photo_plain_$i.jpg")
                                 
                                 if (caption != null) {
                                     photoBuilder.caption(caption)
@@ -468,7 +449,7 @@ class NotificationProcessor(
                             }
                             MediaType.VIDEO -> {
                                 val videoBuilder = InputMediaVideo.builder()
-                                    .media(attachmentName)
+                                    .media(file, "video_plain_$i.mp4")
                                 
                                 if (caption != null) {
                                     videoBuilder.caption(caption)
@@ -485,15 +466,7 @@ class NotificationProcessor(
                         plainMediaList.add(media)
                     }
                     
-                    val plainSendMediaGroupBuilder = SendMediaGroup.builder()
-                        .chatId(chatId)
-                        .medias(plainMediaList)
-                    
-                    plainInputFiles.values.forEach { inputFile ->
-                        plainSendMediaGroupBuilder.addInputFile(inputFile)
-                    }
-                    
-                    val plainSendMediaGroup = plainSendMediaGroupBuilder.build()
+                    val plainSendMediaGroup = SendMediaGroup(chatId, plainMediaList)
                     
                     withTimeout(25000) {
                         withContext(Dispatchers.IO) {
@@ -518,10 +491,9 @@ class NotificationProcessor(
         }
     }
 
-
     /**
-    * Fallback: send media attachments individually when media group fails
-    */
+     * Fallback: send media attachments individually when media group fails
+     */
     private suspend fun sendMediaGroupFallback(
         chatId: String,
         attachments: List<MediaAttachment>,
