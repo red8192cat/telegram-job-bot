@@ -385,7 +385,7 @@ class MediaDownloader {
     }
     
     /**
-     * COMPLETELY REWRITTEN: Handle completed download with Docker permissions fix
+     * DOCKER-AWARE: Handle completed download with comprehensive permission debugging
      */
     private fun handleCompletedDownload(
         file: TdApi.File,
@@ -418,99 +418,21 @@ class MediaDownloader {
             
             logger.debug { "TDLib reports file at: '$tdlibSourcePath' (verified size: $expectedSize bytes)" }
             
+            // DEBUG: Comprehensive permission analysis
+            debugPermissions(tdlibSourcePath, expectedSize)
+            
             // STRATEGY 1: Try direct access first (works when permissions are correct)
             val directFile = File(tdlibSourcePath)
-            if (directFile.exists() && directFile.length() == expectedSize && directFile.length() > 0) {
-                try {
-                    // Test actual read access by trying to read first byte
-                    directFile.inputStream().use { stream ->
-                        stream.read() // This will throw if we can't actually read
-                    }
-                    logger.info { "✅ Direct file access successful: ${getSafeFilename(directFile)} (${directFile.length()} bytes)" }
-                    copyFileToTarget(directFile, targetPath, deferred)
-                    return
-                } catch (e: Exception) {
-                    logger.debug { "Direct file access failed (permission issue): ${e.message}" }
-                }
+            if (tryDirectFileAccess(directFile, expectedSize, targetPath, deferred)) {
+                return
             }
             
-            // STRATEGY 2: Search directory with permission-aware filtering
-            val parentDir = File(tdlibSourcePath).parentFile
-            
-            if (parentDir?.exists() == true) {
-                logger.debug { "Searching directory for readable file with exact size: $expectedSize bytes" }
-                
-                // Get all files in directory and test them for actual readability
-                val allFiles = try {
-                    parentDir.listFiles()?.toList() ?: emptyList()
-                } catch (e: Exception) {
-                    logger.warn { "Cannot list directory contents: ${e.message}" }
-                    emptyList()
-                }
-                
-                logger.debug { "Directory contains ${allFiles.size} total files" }
-                
-                // Find candidates by size and actual readability
-                val candidates = allFiles.mapNotNull { candidateFile ->
-                    try {
-                        if (!candidateFile.isFile) return@mapNotNull null
-                        
-                        // Get actual file size
-                        val actualSize = candidateFile.length()
-                        
-                        // Test readability with actual stream access
-                        val isReadable = try {
-                            candidateFile.inputStream().use { stream ->
-                                stream.read() // Test actual read access
-                                true
-                            }
-                        } catch (e: Exception) {
-                            false
-                        }
-                        
-                        val ageSeconds = (System.currentTimeMillis() - candidateFile.lastModified()) / 1000
-                        val safeFileName = getSafeFilename(candidateFile)
-                        
-                        logger.debug { 
-                            "File: $safeFileName, size: $actualSize, readable: $isReadable, age: ${ageSeconds}s, " +
-                            "target_size: $expectedSize, match: ${actualSize == expectedSize}" 
-                        }
-                        
-                        if (actualSize == expectedSize && actualSize > 0 && isReadable) {
-                            CandidateFile(candidateFile, ageSeconds)
-                        } else null
-                        
-                    } catch (e: Exception) {
-                        logger.debug { "Error examining file ${candidateFile.name}: ${e.message}" }
-                        null
-                    }
-                }
-                
-                logger.debug { "Found ${candidates.size} readable candidate files with correct size" }
-                
-                if (candidates.isNotEmpty()) {
-                    // Log all candidates for debugging
-                    candidates.forEachIndexed { index, candidate ->
-                        val safeFileName = getSafeFilename(candidate.file)
-                        logger.debug { "Readable candidate $index: $safeFileName (${candidate.file.length()} bytes, age: ${candidate.ageSeconds}s)" }
-                    }
-                    
-                    // Prefer recently modified files (likely the one we just downloaded)
-                    val bestCandidate = candidates.minByOrNull { it.ageSeconds }
-                    if (bestCandidate != null) {
-                        logger.info { "✅ Found readable file: ${getSafeFilename(bestCandidate.file)} (age: ${bestCandidate.ageSeconds}s)" }
-                        copyFileToTarget(bestCandidate.file, targetPath, deferred)
-                        return
-                    }
-                } else {
-                    logger.warn { "No readable files found with correct size $expectedSize" }
-                    logDirectoryContentsDetailed(allFiles, expectedSize)
-                }
-            } else {
-                logger.warn { "Parent directory does not exist: ${parentDir?.absolutePath}" }
+            // STRATEGY 2: Search directory for alternative files
+            if (tryDirectorySearch(directFile.parentFile, expectedSize, targetPath, deferred)) {
+                return
             }
             
-            logger.warn { "Could not locate readable downloaded file - this indicates a Docker permission or TDLib issue" }
+            logger.warn { "All file access strategies failed - this indicates a Docker permission or TDLib issue" }
             deferred.complete(null)
             
         } catch (e: Exception) {
@@ -520,12 +442,240 @@ class MediaDownloader {
     }
     
     /**
-     * Data class for candidate files with timing info
+     * Comprehensive permission debugging to understand the root cause
      */
-    private data class CandidateFile(
-        val file: File,
-        val ageSeconds: Long
-    )
+    private fun debugPermissions(filePath: String, expectedSize: Long) {
+        logger.info { "=== PERMISSION DEBUGGING ===" }
+        
+        try {
+            // Check what user our Java process is running as
+            val currentUser = System.getProperty("user.name")
+            val userHome = System.getProperty("user.home")
+            val javaVersion = System.getProperty("java.version")
+            
+            logger.info { "Java process info:" }
+            logger.info { "  user.name: $currentUser" }
+            logger.info { "  user.home: $userHome" }
+            logger.info { "  java.version: $javaVersion" }
+            
+            // Get system user info via external command
+            try {
+                val whoamiProcess = ProcessBuilder("whoami").start()
+                val whoamiResult = whoamiProcess.inputStream.bufferedReader().readText().trim()
+                logger.info { "  whoami result: $whoamiResult" }
+                
+                val idProcess = ProcessBuilder("id").start()
+                val idResult = idProcess.inputStream.bufferedReader().readText().trim()
+                logger.info { "  id result: $idResult" }
+            } catch (e: Exception) {
+                logger.warn { "Could not get system user info: ${e.message}" }
+            }
+            
+            // Analyze the specific file
+            val file = File(filePath)
+            logger.info { "File analysis for: $filePath" }
+            logger.info { "  file.exists(): ${file.exists()}" }
+            logger.info { "  file.isFile(): ${file.isFile()}" }
+            logger.info { "  file.canRead(): ${file.canRead()}" }
+            logger.info { "  file.canWrite(): ${file.canWrite()}" }
+            logger.info { "  file.length(): ${file.length()}" }
+            logger.info { "  expected size: $expectedSize" }
+            
+            // Get detailed file info via ls command
+            try {
+                val lsProcess = ProcessBuilder("ls", "-la", filePath).start()
+                val lsResult = lsProcess.inputStream.bufferedReader().readText().trim()
+                logger.info { "  ls -la result: $lsResult" }
+            } catch (e: Exception) {
+                logger.warn { "Could not get ls info: ${e.message}" }
+            }
+            
+            // Get file ownership details via stat command
+            try {
+                val statProcess = ProcessBuilder("stat", "-c", "%n %s %U:%G %a", filePath).start()
+                val statResult = statProcess.inputStream.bufferedReader().readText().trim()
+                logger.info { "  stat result: $statResult" }
+            } catch (e: Exception) {
+                logger.warn { "Could not get stat info: ${e.message}" }
+            }
+            
+            // Check directory permissions
+            val parentDir = file.parentFile
+            if (parentDir != null) {
+                logger.info { "Parent directory analysis: ${parentDir.absolutePath}" }
+                logger.info { "  dir.exists(): ${parentDir.exists()}" }
+                logger.info { "  dir.canRead(): ${parentDir.canRead()}" }
+                logger.info { "  dir.canExecute(): ${parentDir.canExecute()}" }
+                
+                try {
+                    val dirLsProcess = ProcessBuilder("ls", "-lad", parentDir.absolutePath).start()
+                    val dirLsResult = dirLsProcess.inputStream.bufferedReader().readText().trim()
+                    logger.info { "  dir ls -lad result: $dirLsResult" }
+                } catch (e: Exception) {
+                    logger.warn { "Could not get directory ls info: ${e.message}" }
+                }
+            }
+            
+            // Test actual file access with different methods
+            logger.info { "File access testing:" }
+            
+            // Test 1: Basic FileInputStream
+            try {
+                file.inputStream().use { stream ->
+                    val firstByte = stream.read()
+                    logger.info { "  FileInputStream test: SUCCESS (first byte: $firstByte)" }
+                }
+            } catch (e: Exception) {
+                logger.warn { "  FileInputStream test: FAILED - ${e.javaClass.simpleName}: ${e.message}" }
+            }
+            
+            // Test 2: Files.readAllBytes
+            try {
+                val bytes = java.nio.file.Files.readAllBytes(file.toPath())
+                logger.info { "  Files.readAllBytes test: SUCCESS (${bytes.size} bytes)" }
+            } catch (e: Exception) {
+                logger.warn { "  Files.readAllBytes test: FAILED - ${e.javaClass.simpleName}: ${e.message}" }
+            }
+            
+            // Test 3: RandomAccessFile
+            try {
+                java.io.RandomAccessFile(file, "r").use { raf ->
+                    val length = raf.length()
+                    logger.info { "  RandomAccessFile test: SUCCESS ($length bytes)" }
+                }
+            } catch (e: Exception) {
+                logger.warn { "  RandomAccessFile test: FAILED - ${e.javaClass.simpleName}: ${e.message}" }
+            }
+            
+            // Test 4: Check if it's a special file type
+            try {
+                val path = file.toPath()
+                val attrs = java.nio.file.Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java)
+                logger.info { "  File attributes:" }
+                logger.info { "    isRegularFile: ${attrs.isRegularFile}" }
+                logger.info { "    isDirectory: ${attrs.isDirectory}" }
+                logger.info { "    isSymbolicLink: ${attrs.isSymbolicLink}" }
+                logger.info { "    size: ${attrs.size()}" }
+                logger.info { "    lastModified: ${attrs.lastModifiedTime()}" }
+            } catch (e: Exception) {
+                logger.warn { "  File attributes test: FAILED - ${e.javaClass.simpleName}: ${e.message}" }
+            }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error during permission debugging" }
+        }
+        
+        logger.info { "=== END PERMISSION DEBUGGING ===" }
+    }
+    
+    /**
+     * Try direct file access with detailed error reporting
+     */
+    private fun tryDirectFileAccess(
+        directFile: File, 
+        expectedSize: Long, 
+        targetPath: String, 
+        deferred: CompletableDeferred<String?>
+    ): Boolean {
+        logger.info { "Attempting direct file access..." }
+        
+        try {
+            if (!directFile.exists()) {
+                logger.warn { "File does not exist: ${directFile.absolutePath}" }
+                return false
+            }
+            
+            if (!directFile.isFile()) {
+                logger.warn { "Path is not a regular file: ${directFile.absolutePath}" }
+                return false
+            }
+            
+            val actualSize = directFile.length()
+            logger.info { "File size check: actual=$actualSize, expected=$expectedSize" }
+            
+            if (actualSize != expectedSize) {
+                logger.warn { "File size mismatch: expected $expectedSize, got $actualSize" }
+                return false
+            }
+            
+            if (actualSize == 0L) {
+                logger.warn { "File has 0 bytes" }
+                return false
+            }
+            
+            // Test actual read access
+            directFile.inputStream().use { stream ->
+                val buffer = ByteArray(1024)
+                val bytesRead = stream.read(buffer)
+                if (bytesRead > 0) {
+                    logger.info { "✅ Direct file access successful: read $bytesRead bytes" }
+                    copyFileToTarget(directFile, targetPath, deferred)
+                    return true
+                } else {
+                    logger.warn { "File read returned 0 bytes despite file size $actualSize" }
+                    return false
+                }
+            }
+        } catch (e: Exception) {
+            logger.warn { "Direct file access failed: ${e.javaClass.simpleName} - ${e.message}" }
+            return false
+        }
+    }
+    
+    /**
+     * Search directory for files with correct size (simplified version)
+     */
+    private fun tryDirectorySearch(
+        parentDir: File?, 
+        expectedSize: Long, 
+        targetPath: String, 
+        deferred: CompletableDeferred<String?>
+    ): Boolean {
+        if (parentDir?.exists() != true) {
+            logger.warn { "Parent directory does not exist: ${parentDir?.absolutePath}" }
+            return false
+        }
+        
+        try {
+            logger.info { "Searching directory for file with size: $expectedSize bytes" }
+            
+            val allFiles = try {
+                parentDir.listFiles()?.toList() ?: emptyList()
+            } catch (e: Exception) {
+                logger.warn { "Cannot list directory contents: ${e.message}" }
+                return false
+            }
+            
+            logger.info { "Directory contains ${allFiles.size} total files" }
+            
+            // Test each file
+            for (candidateFile in allFiles) {
+                try {
+                    if (!candidateFile.isFile) continue
+                    
+                    val actualSize = candidateFile.length()
+                    val safeFileName = getSafeFilename(candidateFile)
+                    
+                    logger.info { "Testing file: $safeFileName (size: $actualSize)" }
+                    
+                    if (actualSize == expectedSize && actualSize > 0) {
+                        logger.info { "Found size match, testing access..." }
+                        if (tryDirectFileAccess(candidateFile, expectedSize, targetPath, deferred)) {
+                            return true
+                        }
+                    }
+                    
+                } catch (e: Exception) {
+                    logger.debug { "Error testing candidate file: ${e.message}" }
+                }
+            }
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Error during directory search" }
+        }
+        
+        return false
+    }
     
     /**
      * Get filename safely for logging (handles encoding errors gracefully)
