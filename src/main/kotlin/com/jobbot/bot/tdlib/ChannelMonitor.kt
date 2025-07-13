@@ -5,6 +5,7 @@ import com.jobbot.core.MessageProcessor
 import com.jobbot.data.Database
 import com.jobbot.data.models.ChannelMessage
 import com.jobbot.data.models.ChannelDetails
+import com.jobbot.data.models.MediaAttachment
 import com.jobbot.infrastructure.monitoring.ErrorTracker
 import com.jobbot.shared.getLogger
 import com.jobbot.shared.utils.TelegramMarkdownConverter
@@ -14,8 +15,8 @@ import org.drinkless.tdlib.TdApi
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Handles TDLib message monitoring and processing with MEDIA DOWNLOAD support
- * UPDATED: Added media attachment downloading and processing
+ * Handles TDLib message monitoring and processing with MEDIA GROUP support
+ * ENHANCED: Properly handles media groups (multiple media files with single caption)
  */
 class ChannelMonitor(
     private val database: Database,
@@ -28,6 +29,17 @@ class ChannelMonitor(
     // ADDED: Media downloader for handling attachments
     private val mediaDownloader = MediaDownloader()
     
+    // ADDED: Media group handling
+    private val mediaGroups = ConcurrentHashMap<Long, MediaGroupCollector>()
+    
+    // Data class for collecting media group messages
+    private data class MediaGroupCollector(
+        val mediaGroupId: Long,
+        val messages: MutableList<TdApi.Message> = mutableListOf(),
+        val createdTime: Long = System.currentTimeMillis(),
+        var hasTextMessage: Boolean = false
+    )
+    
     // Bounded cache with automatic cleanup
     private val channelIdCache = object : LinkedHashMap<String, Long>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean {
@@ -36,11 +48,12 @@ class ChannelMonitor(
     }
     
     init {
-        // Start periodic cleanup of old temp files
+        // Start periodic cleanup of old temp files and media groups
         scope.launch {
             while (isActive) {
                 delay(3600000) // Every hour
                 mediaDownloader.cleanupOldTempFiles()
+                cleanupOldMediaGroups()
             }
         }
     }
@@ -75,9 +88,9 @@ class ChannelMonitor(
                 
                 logger.info { "Processing message from monitored chat: $channelId (type: ${if (isChannelPost) "channel" else "group"})" }
                 
-                // Process message with media downloads
+                // ENHANCED: Handle media groups properly
                 scope.launch {
-                    processMessageWithMedia(message, channelId, client)
+                    handleMessageWithMediaGroup(message, channelId, client)
                 }
             } else {
                 logger.debug { "Ignoring message from unmonitored chat $chatId (isChannelPost: $isChannelPost)" }
@@ -89,7 +102,150 @@ class ChannelMonitor(
     }
     
     /**
-     * Process message with media download support
+     * Handle message with proper media group support
+     * ENHANCED: Collects media group messages and processes them together
+     */
+    private suspend fun handleMessageWithMediaGroup(
+        message: TdApi.Message,
+        channelId: String,
+        client: Client?
+    ) {
+        try {
+            // Check if this message is part of a media group
+            val mediaGroupId = message.mediaAlbumId
+            
+            if (mediaGroupId != 0L) {
+                // This is part of a media group
+                logger.debug { "Message ${message.id} is part of media group $mediaGroupId" }
+                
+                val collector = mediaGroups.getOrPut(mediaGroupId) {
+                    MediaGroupCollector(mediaGroupId)
+                }
+                
+                synchronized(collector) {
+                    collector.messages.add(message)
+                    
+                    // Check if this message has text content
+                    val (plainText, _) = extractMessageContent(message.content)
+                    if (plainText.isNotBlank()) {
+                        collector.hasTextMessage = true
+                        logger.debug { "Media group $mediaGroupId now has text content" }
+                    }
+                }
+                
+                // Wait a bit for other messages in the group, then process
+                delay(1000) // Wait 1 second for all media group messages
+                
+                // Check if we should process this media group now
+                val shouldProcess = synchronized(collector) {
+                    // Process if we have text content OR if enough time has passed
+                    collector.hasTextMessage || 
+                    (System.currentTimeMillis() - collector.createdTime > 3000) // 3 second timeout
+                }
+                
+                if (shouldProcess) {
+                    val removedCollector = mediaGroups.remove(mediaGroupId)
+                    if (removedCollector != null) {
+                        logger.debug { "Processing media group $mediaGroupId with ${removedCollector.messages.size} messages" }
+                        processMediaGroup(removedCollector.messages, channelId, client)
+                    }
+                }
+                
+            } else {
+                // Single message (not part of a media group)
+                logger.debug { "Processing single message ${message.id}" }
+                processMessageWithMedia(message, channelId, client)
+            }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error handling message with media group" }
+            ErrorTracker.logError("ERROR", "Media group handler error: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * Process a complete media group (multiple media files + caption)
+     */
+    private suspend fun processMediaGroup(
+        messages: List<TdApi.Message>,
+        channelId: String,
+        client: Client?
+    ) {
+        try {
+            logger.debug { "Processing media group with ${messages.size} messages" }
+            
+            // Find the message with text content (usually the last one)
+            val textMessage = messages.find { message ->
+                val (plainText, _) = extractMessageContent(message.content)
+                plainText.isNotBlank()
+            }
+            
+            // Collect all media attachments from all messages
+            val allMediaAttachments = mutableListOf<MediaAttachment>()
+            
+            for (message in messages) {
+                val mediaAttachments = mediaDownloader.downloadMessageMedia(message, client)
+                allMediaAttachments.addAll(mediaAttachments)
+                
+                if (mediaAttachments.isNotEmpty()) {
+                    logger.debug { "Downloaded ${mediaAttachments.size} attachments from message ${message.id}" }
+                }
+            }
+            
+            logger.info { "Media group processing: ${allMediaAttachments.size} total attachments from ${messages.size} messages" }
+            
+            // Use text from the text message, or generate generic text
+            val (plainText, formattedText) = if (textMessage != null) {
+                extractMessageContent(textMessage.content)
+            } else {
+                // Generate generic text based on media types
+                val mediaTypes = allMediaAttachments.map { it.type.name.lowercase() }.distinct()
+                val genericText = "media post ${mediaTypes.joinToString(" ")}"
+                Pair(genericText, genericText)
+            }
+            
+            // Get channel details
+            val channelDetails = database.getAllChannelsWithDetails().find { it.channelId == channelId }
+            val displayName = when {
+                !channelDetails?.channelTag.isNullOrBlank() -> channelDetails!!.channelTag!!
+                !channelDetails?.channelName.isNullOrBlank() -> channelDetails!!.channelName!!
+                else -> "Channel"
+            }
+            
+            // Use the last message for link generation (usually has the text)
+            val linkMessage = textMessage ?: messages.last()
+            val messageLink = generateMessageLink(channelDetails, linkMessage.id)
+            
+            // Create a single ChannelMessage with all media attachments
+            val channelMessage = ChannelMessage(
+                channelId = channelId,
+                channelName = displayName,
+                messageId = linkMessage.id,
+                text = plainText,
+                formattedText = if (textMessage != null) formattedText else null,
+                senderUsername = null,
+                messageLink = messageLink,
+                mediaAttachments = allMediaAttachments
+            )
+            
+            logger.debug { "Processing media group as single message with ${allMediaAttachments.size} attachments" }
+            val notifications = messageProcessor.processChannelMessage(channelMessage)
+            
+            logger.info { "Media group processing complete. Generated ${notifications.size} notifications with ${allMediaAttachments.size} attachments each" }
+            
+            // Queue notifications as a batch for media reuse
+            if (notifications.isNotEmpty()) {
+                bot?.queueNotifications(notifications)
+            }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error processing media group" }
+            ErrorTracker.logError("ERROR", "Media group processing error: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * Process single message with media downloads
      */
     private suspend fun processMessageWithMedia(
         message: TdApi.Message,
@@ -97,22 +253,20 @@ class ChannelMonitor(
         client: Client?
     ) {
         try {
-            // Extract text content (existing logic)
+            // Extract text content
             val (plainText, formattedText) = extractMessageContent(message.content)
             
-            if (plainText.isBlank()) {
-                logger.debug { "Message has no text content, skipping" }
+            // Download media attachments
+            logger.debug { "Downloading media attachments for message ${message.id}" }
+            val mediaAttachments = mediaDownloader.downloadMessageMedia(message, client)
+            
+            // Skip if no text and no media
+            if (plainText.isBlank() && mediaAttachments.isEmpty()) {
+                logger.debug { "Message has no text content and no media attachments, skipping" }
                 return
             }
             
-            logger.debug { "Processing plain text: '$plainText'" }
-            if (formattedText != plainText) {
-                logger.debug { "Generated formatted text with ${formattedText.length - plainText.length} additional markup characters" }
-            }
-            
-            // ADDED: Download media attachments with improved timeout
-            logger.debug { "Downloading media attachments for message ${message.id}" }
-            val mediaAttachments = mediaDownloader.downloadMessageMedia(message, client)
+            logger.debug { "Processing single message: text='${plainText.take(50)}${if (plainText.length > 50) "..." else ""}', media=${mediaAttachments.size}" }
             
             if (mediaAttachments.isNotEmpty()) {
                 logger.info { "Downloaded ${mediaAttachments.size} media attachments for message ${message.id}" }
@@ -122,8 +276,6 @@ class ChannelMonitor(
                         "(${attachment.fileSize / 1024}KB) -> ${attachment.filePath}" 
                     }
                 }
-            } else {
-                logger.debug { "No media attachments found for message ${message.id}" }
             }
             
             // Get channel details
@@ -131,47 +283,79 @@ class ChannelMonitor(
             val displayName = when {
                 !channelDetails?.channelTag.isNullOrBlank() -> channelDetails!!.channelTag!!
                 !channelDetails?.channelName.isNullOrBlank() -> channelDetails!!.channelName!!
-                else -> if (message.isChannelPost) "Channel" else "Group"
+                else -> "Channel"
             }
             
-            // Generate message link (for both channels and groups)
             val messageLink = generateMessageLink(channelDetails, message.id)
             
-            // Create ChannelMessage with media attachments
+            // Handle media-only messages
+            val finalPlainText = if (plainText.isBlank() && mediaAttachments.isNotEmpty()) {
+                // Generate generic text for keyword matching
+                when (mediaAttachments.first().type) {
+                    MediaType.PHOTO -> "photo image picture"
+                    MediaType.VIDEO -> "video clip recording"
+                    MediaType.DOCUMENT -> "document file attachment"
+                    MediaType.AUDIO -> "audio sound music"
+                    MediaType.VOICE -> "voice message recording"
+                    MediaType.ANIMATION -> "gif animation video"
+                }
+            } else {
+                plainText
+            }
+            
             val channelMessage = ChannelMessage(
                 channelId = channelId,
                 channelName = displayName,
                 messageId = message.id,
-                text = plainText, // For keyword matching
-                formattedText = formattedText, // For user notifications
-                senderUsername = null, // Not needed anymore
+                text = finalPlainText,
+                formattedText = if (plainText.isNotBlank()) formattedText else null,
+                senderUsername = null,
                 messageLink = messageLink,
-                mediaAttachments = mediaAttachments // ADDED: Include media attachments
+                mediaAttachments = mediaAttachments
             )
             
-            logger.debug { "Calling messageProcessor.processChannelMessage..." }
+            logger.debug { "Processing single message..." }
             val notifications = messageProcessor.processChannelMessage(channelMessage)
             
-            logger.info { "Message processing complete. Generated ${notifications.size} notifications" }
+            logger.info { "Single message processing complete. Generated ${notifications.size} notifications" }
             
-            // OPTIMIZED: Queue notifications as a batch for media reuse
             if (notifications.isNotEmpty()) {
-                logger.debug { "Batch queueing ${notifications.size} notifications with ${mediaAttachments.size} attachments each" }
-                bot?.queueNotifications(notifications) // Use new batch method
+                bot?.queueNotifications(notifications)
             }
             
-            logger.debug { "Processed message from monitored chat $channelId, generated ${notifications.size} notifications" }
+        } catch (e: Exception) {
+            logger.error(e) { "Error processing single message with media" }
+            ErrorTracker.logError("ERROR", "Single message processing error: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * Clean up old media groups that might have been orphaned
+     */
+    private fun cleanupOldMediaGroups() {
+        try {
+            val currentTime = System.currentTimeMillis()
+            val expiredGroups = mediaGroups.entries
+                .filter { (_, collector) -> currentTime - collector.createdTime > 300000 } // 5 minutes old
+                .map { it.key }
+            
+            expiredGroups.forEach { groupId ->
+                mediaGroups.remove(groupId)
+                logger.debug { "Cleaned up expired media group: $groupId" }
+            }
+            
+            if (expiredGroups.isNotEmpty()) {
+                logger.debug { "Cleaned up ${expiredGroups.size} expired media groups" }
+            }
             
         } catch (e: Exception) {
-            logger.error(e) { "Error processing message with media" }
-            ErrorTracker.logError("ERROR", "Message processing with media error: ${e.message}", e)
+            logger.warn(e) { "Error during media group cleanup" }
         }
     }
     
     /**
      * Extract both plain text and formatted text from message content
-     * Returns Pair<plainText, formattedText>
-     * UNCHANGED: This method remains the same
+     * (existing method - unchanged)
      */
     private fun extractMessageContent(content: TdApi.MessageContent): Pair<String, String> {
         return when (content) {
@@ -179,16 +363,6 @@ class ChannelMonitor(
                 val plainText = content.text.text
                 val formattedText = convertFormattedTextToMarkdown(content.text)
                 logger.debug { "Text message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
-                
-                if (content.text.entities.isNotEmpty()) {
-                    logger.debug { "Message entities: ${content.text.entities.size} entities found" }
-                    content.text.entities.forEach { entity ->
-                        logger.debug { "Entity: ${entity.type.javaClass.simpleName} at ${entity.offset}-${entity.offset + entity.length}" }
-                    }
-                } else {
-                    logger.debug { "Message has no entities" }
-                }
-                
                 Pair(plainText, formattedText)
             }
             is TdApi.MessagePhoto -> {
@@ -233,6 +407,7 @@ class ChannelMonitor(
             }
         }
     }
+    
     
     /**
      * Unified MarkdownV2 conversion for all message types
