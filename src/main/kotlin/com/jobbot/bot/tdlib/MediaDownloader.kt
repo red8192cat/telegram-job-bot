@@ -48,42 +48,42 @@ class MediaDownloader {
             when (val content = message.content) {
                 is TdApi.MessagePhoto -> {
                     logger.debug { "Processing photo message" }
-                    downloadPhoto(content, client, message.caption?.text)?.let { 
+                    downloadPhoto(content, client, content.caption?.text)?.let { 
                         attachments.add(it) 
                     }
                 }
                 
                 is TdApi.MessageVideo -> {
                     logger.debug { "Processing video message" }
-                    downloadVideo(content, client, message.caption?.text)?.let { 
+                    downloadVideo(content, client, content.caption?.text)?.let { 
                         attachments.add(it) 
                     }
                 }
                 
                 is TdApi.MessageDocument -> {
                     logger.debug { "Processing document message" }
-                    downloadDocument(content, client, message.caption?.text)?.let { 
+                    downloadDocument(content, client, content.caption?.text)?.let { 
                         attachments.add(it) 
                     }
                 }
                 
                 is TdApi.MessageAudio -> {
                     logger.debug { "Processing audio message" }
-                    downloadAudio(content, client, message.caption?.text)?.let { 
+                    downloadAudio(content, client, content.caption?.text)?.let { 
                         attachments.add(it) 
                     }
                 }
                 
                 is TdApi.MessageVoiceNote -> {
                     logger.debug { "Processing voice note message" }
-                    downloadVoiceNote(content, client, message.caption?.text)?.let { 
+                    downloadVoiceNote(content, client, null)?.let { 
                         attachments.add(it) 
                     }
                 }
                 
                 is TdApi.MessageAnimation -> {
                     logger.debug { "Processing animation/GIF message" }
-                    downloadAnimation(content, client, message.caption?.text)?.let { 
+                    downloadAnimation(content, client, content.caption?.text)?.let { 
                         attachments.add(it) 
                     }
                 }

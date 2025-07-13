@@ -300,7 +300,7 @@ class NotificationProcessor(
                 }
             }
             true
-        } catch (e: Exception) {
+        } catch (e: TelegramApiException) {
             if (isFormattingError(e)) false else throw e
         }
     }
@@ -346,7 +346,7 @@ class NotificationProcessor(
                 }
             }
             true
-        } catch (e: Exception) {
+        } catch (e: TelegramApiException) {
             if (isFormattingError(e)) false else throw e
         }
     }
@@ -397,7 +397,7 @@ class NotificationProcessor(
                 }
             }
             true
-        } catch (e: Exception) {
+        } catch (e: TelegramApiException) {
             if (isFormattingError(e)) false else throw e
         }
     }
@@ -443,7 +443,7 @@ class NotificationProcessor(
                 }
             }
             true
-        } catch (e: Exception) {
+        } catch (e: TelegramApiException) {
             if (isFormattingError(e)) false else throw e
         }
     }
@@ -485,7 +485,7 @@ class NotificationProcessor(
                 }
             }
             true
-        } catch (e: Exception) {
+        } catch (e: TelegramApiException) {
             if (isFormattingError(e)) false else throw e
         }
     }
@@ -530,7 +530,7 @@ class NotificationProcessor(
                 }
             }
             true
-        } catch (e: Exception) {
+        } catch (e: TelegramApiException) {
             if (isFormattingError(e)) false else throw e
         }
     }
