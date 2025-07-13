@@ -12,16 +12,82 @@ import java.util.*
 
 /**
  * Downloads media attachments from TDLib messages
- * FIXED: Improved timeout handling and added polling mechanism
+ * FIXED: Robust error handling for TDLib download issues
  */
 class MediaDownloader {
     private val logger = getLogger("MediaDownloader")
     
     companion object {
         private const val MAX_FILE_SIZE = 50 * 1024 * 1024L // 50MB limit
-        private const val DOWNLOAD_TIMEOUT_MS = 45000L // 45 seconds per file (increased)
+        private const val DOWNLOAD_TIMEOUT_MS = 45000L // 45 seconds per file
         private const val DOWNLOAD_POLL_INTERVAL_MS = 500L // Check every 500ms
+        private const val MAX_POLL_ATTEMPTS = 90 // 45 seconds / 500ms
         private const val TMP_DIR = "/tmp/jobbot_media"
+    }
+    
+    /**
+     * Sanitize filename to avoid Unicode, special characters, and filesystem issues
+     * FIXED: Handle Cyrillic characters, spaces, and other problematic characters
+     */
+    private fun sanitizeFilename(originalName: String): String {
+        try {
+            var sanitized = originalName
+            
+            // 1. Replace problematic characters with safe alternatives
+            sanitized = sanitized
+                // Replace multiple spaces with single underscore
+                .replace(Regex("\\s+"), "_")
+                // Replace Cyrillic and other non-ASCII with transliteration or removal
+                .replace(Regex("[а-яё]", RegexOption.IGNORE_CASE)) { match ->
+                    // Simple Cyrillic transliteration
+                    when (match.value.lowercase()) {
+                        "а" -> "a"; "б" -> "b"; "в" -> "v"; "г" -> "g"; "д" -> "d"
+                        "е" -> "e"; "ё" -> "yo"; "ж" -> "zh"; "з" -> "z"; "и" -> "i"
+                        "й" -> "y"; "к" -> "k"; "л" -> "l"; "м" -> "m"; "н" -> "n"
+                        "о" -> "o"; "п" -> "p"; "р" -> "r"; "с" -> "s"; "т" -> "t"
+                        "у" -> "u"; "ф" -> "f"; "х" -> "h"; "ц" -> "ts"; "ч" -> "ch"
+                        "ш" -> "sh"; "щ" -> "sch"; "ъ" -> ""; "ы" -> "y"; "ь" -> ""
+                        "э" -> "e"; "ю" -> "yu"; "я" -> "ya"
+                        else -> "_"
+                    }
+                }
+                // Remove any remaining non-ASCII characters
+                .replace(Regex("[^\\x00-\\x7F]"), "_")
+                // Replace other problematic characters
+                .replace(Regex("[<>:\"/\\\\|?*]"), "_")
+                // Remove control characters
+                .replace(Regex("[\\x00-\\x1F\\x7F]"), "")
+                // Replace multiple underscores with single
+                .replace(Regex("_+"), "_")
+                // Remove leading/trailing underscores and dots
+                .trim('_', '.')
+            
+            // 2. Ensure filename is not empty and not too long
+            if (sanitized.isBlank()) {
+                sanitized = "media_file"
+            }
+            
+            // 3. Limit length to avoid filesystem issues
+            if (sanitized.length > 100) {
+                val extension = if (sanitized.contains('.')) {
+                    "." + sanitized.substringAfterLast('.')
+                } else ""
+                val nameWithoutExt = sanitized.substringBeforeLast('.')
+                sanitized = nameWithoutExt.take(100 - extension.length) + extension
+            }
+            
+            // 4. Add timestamp to make unique if still problematic
+            if (sanitized.length < 3) {
+                sanitized = "media_${System.currentTimeMillis()}"
+            }
+            
+            logger.debug { "Filename sanitized: '$originalName' -> '$sanitized'" }
+            return sanitized
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Error sanitizing filename '$originalName', using fallback" }
+            return "media_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}"
+        }
     }
     
     init {
@@ -181,14 +247,15 @@ class MediaDownloader {
             return null
         }
         
-        val fileName = document.fileName.ifBlank { "document_${UUID.randomUUID()}" }
-        val localPath = downloadFile(client, document.document.id, fileName)
+        // FIXED: Better filename handling for documents
+        val originalFileName = document.fileName.ifBlank { "document_${UUID.randomUUID()}" }
+        val localPath = downloadFile(client, document.document.id, originalFileName)
         
         return if (localPath != null) {
             MediaAttachment(
                 type = MediaType.DOCUMENT,
                 filePath = localPath,
-                originalFileName = fileName,
+                originalFileName = originalFileName,
                 fileSize = document.document.size.toLong(),
                 mimeType = document.mimeType,
                 caption = caption
@@ -208,14 +275,15 @@ class MediaDownloader {
             return null
         }
         
-        val fileName = audio.fileName.ifBlank { "audio_${UUID.randomUUID()}.mp3" }
-        val localPath = downloadFile(client, audio.audio.id, fileName)
+        // FIXED: Better filename handling for audio files
+        val originalFileName = audio.fileName.ifBlank { "audio_${UUID.randomUUID()}.mp3" }
+        val localPath = downloadFile(client, audio.audio.id, originalFileName)
         
         return if (localPath != null) {
             MediaAttachment(
                 type = MediaType.AUDIO,
                 filePath = localPath,
-                originalFileName = fileName,
+                originalFileName = originalFileName,
                 fileSize = audio.audio.size.toLong(),
                 mimeType = audio.mimeType,
                 caption = caption,
@@ -263,14 +331,15 @@ class MediaDownloader {
             return null
         }
         
-        val fileName = animation.fileName.ifBlank { "animation_${UUID.randomUUID()}.gif" }
-        val localPath = downloadFile(client, animation.animation.id, fileName)
+        // FIXED: Better filename handling for animations
+        val originalFileName = animation.fileName.ifBlank { "animation_${UUID.randomUUID()}.gif" }
+        val localPath = downloadFile(client, animation.animation.id, originalFileName)
         
         return if (localPath != null) {
             MediaAttachment(
                 type = MediaType.ANIMATION,
                 filePath = localPath,
-                originalFileName = fileName,
+                originalFileName = originalFileName,
                 fileSize = animation.animation.size.toLong(),
                 mimeType = animation.mimeType,
                 caption = caption,
@@ -282,8 +351,9 @@ class MediaDownloader {
     }
     
     /**
-     * Download a file from TDLib
-     * FIXED: Improved polling mechanism with proper timeout handling
+     * Download a file from TDLib with robust error handling
+     * FIXED: Better handling of TDLib download issues where files don't exist
+     * FIXED: Sanitize filenames to avoid Unicode/special character issues
      * Returns local file path on success, null on failure
      */
     private suspend fun downloadFile(
@@ -293,10 +363,12 @@ class MediaDownloader {
     ): String? = withContext(Dispatchers.IO) {
         
         try {
-            val localPath = File(TMP_DIR, fileName).absolutePath
+            // FIXED: Sanitize filename to avoid Unicode/space issues
+            val sanitizedFileName = sanitizeFilename(fileName)
+            val localPath = File(TMP_DIR, sanitizedFileName).absolutePath
             val deferred = CompletableDeferred<String?>()
             
-            logger.debug { "Starting download: fileId=$fileId to $localPath" }
+            logger.debug { "Starting download: fileId=$fileId, original='$fileName', sanitized='$sanitizedFileName'" }
             
             // Start the download
             client.send(TdApi.DownloadFile(fileId, 1, 0, 0, false)) { result ->
@@ -304,21 +376,10 @@ class MediaDownloader {
                     is TdApi.File -> {
                         if (result.local.isDownloadingCompleted) {
                             // File already downloaded or download completed immediately
-                            val sourcePath = result.local.path
-                            
-                            try {
-                                // Copy to our temp directory with desired name
-                                File(sourcePath).copyTo(File(localPath), overwrite = true)
-                                logger.debug { "File downloaded immediately: $localPath" }
-                                deferred.complete(localPath)
-                            } catch (e: Exception) {
-                                logger.error(e) { "Failed to copy immediately downloaded file" }
-                                deferred.complete(null)
-                            }
+                            handleCompletedDownload(result, localPath, deferred)
                         } else {
-                            // Download started, need to poll for completion
+                            // Download started, will be handled by polling
                             logger.debug { "Download started for fileId=$fileId, will poll for completion" }
-                            // Don't complete the deferred here, let the polling handle it
                         }
                     }
                     is TdApi.Error -> {
@@ -330,34 +391,19 @@ class MediaDownloader {
             
             // Start polling for download completion
             val pollJob = launch {
-                val pollStartTime = System.currentTimeMillis()
                 var pollCount = 0
                 
-                while (isActive && !deferred.isCompleted) {
+                while (isActive && !deferred.isCompleted && pollCount < MAX_POLL_ATTEMPTS) {
                     delay(DOWNLOAD_POLL_INTERVAL_MS)
                     pollCount++
-                    
-                    if (System.currentTimeMillis() - pollStartTime > DOWNLOAD_TIMEOUT_MS) {
-                        logger.warn { "Download timeout for fileId=$fileId after ${pollCount} polls" }
-                        deferred.complete(null)
-                        break
-                    }
                     
                     // Check file status
                     client.send(TdApi.GetFile(fileId)) { fileResult ->
                         when (fileResult) {
                             is TdApi.File -> {
                                 if (fileResult.local.isDownloadingCompleted) {
-                                    try {
-                                        File(fileResult.local.path).copyTo(File(localPath), overwrite = true)
-                                        logger.debug { "File downloaded after polling (${pollCount} polls): $localPath" }
-                                        deferred.complete(localPath)
-                                    } catch (e: Exception) {
-                                        logger.error(e) { "Failed to copy file after polling" }
-                                        deferred.complete(null)
-                                    }
+                                    handleCompletedDownload(fileResult, localPath, deferred)
                                 } else {
-                                    // Still downloading, continue polling
                                     logger.debug { "Poll $pollCount: Download still in progress for fileId=$fileId" }
                                 }
                             }
@@ -367,6 +413,12 @@ class MediaDownloader {
                             }
                         }
                     }
+                }
+                
+                // If we've exhausted our poll attempts, fail the download
+                if (pollCount >= MAX_POLL_ATTEMPTS && !deferred.isCompleted) {
+                    logger.warn { "Download timeout for fileId=$fileId after $pollCount polls" }
+                    deferred.complete(null)
                 }
             }
             
@@ -386,6 +438,64 @@ class MediaDownloader {
         } catch (e: Exception) {
             logger.error(e) { "Error downloading file $fileId" }
             null
+        }
+    }
+    
+    /**
+     * Handle completed download with robust error checking
+     * FIXED: Check if source file actually exists before copying
+     */
+    private fun handleCompletedDownload(
+        file: TdApi.File,
+        targetPath: String,
+        deferred: CompletableDeferred<String?>
+    ) {
+        try {
+            val sourcePath = file.local.path
+            
+            if (sourcePath.isNullOrBlank()) {
+                logger.warn { "Download completed but source path is empty" }
+                deferred.complete(null)
+                return
+            }
+            
+            val sourceFile = File(sourcePath)
+            
+            if (!sourceFile.exists()) {
+                logger.warn { "Download completed but source file doesn't exist: $sourcePath" }
+                deferred.complete(null)
+                return
+            }
+            
+            if (!sourceFile.canRead()) {
+                logger.warn { "Download completed but source file is not readable: $sourcePath" }
+                deferred.complete(null)
+                return
+            }
+            
+            if (sourceFile.length() == 0L) {
+                logger.warn { "Download completed but source file is empty: $sourcePath" }
+                deferred.complete(null)
+                return
+            }
+            
+            // Try to copy the file
+            val targetFile = File(targetPath)
+            sourceFile.copyTo(targetFile, overwrite = true)
+            
+            // Verify the copy was successful
+            if (!targetFile.exists() || targetFile.length() != sourceFile.length()) {
+                logger.warn { "File copy verification failed: target=${targetFile.exists()}, sizes: ${sourceFile.length()} -> ${targetFile.length()}" }
+                deferred.complete(null)
+                return
+            }
+            
+            logger.debug { "File downloaded and copied successfully: $targetPath (${targetFile.length()} bytes)" }
+            deferred.complete(targetPath)
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to handle completed download" }
+            deferred.complete(null)
         }
     }
     
