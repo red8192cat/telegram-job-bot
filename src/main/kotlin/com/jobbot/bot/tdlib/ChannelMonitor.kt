@@ -6,6 +6,7 @@ import com.jobbot.data.Database
 import com.jobbot.data.models.ChannelMessage
 import com.jobbot.data.models.ChannelDetails
 import com.jobbot.data.models.MediaAttachment
+import com.jobbot.data.models.MediaType
 import com.jobbot.infrastructure.monitoring.ErrorTracker
 import com.jobbot.shared.getLogger
 import com.jobbot.shared.utils.TelegramMarkdownConverter
@@ -290,14 +291,16 @@ class ChannelMonitor(
             
             // Handle media-only messages
             val finalPlainText = if (plainText.isBlank() && mediaAttachments.isNotEmpty()) {
-                // Generate generic text for keyword matching
-                when (mediaAttachments.first().type) {
+                // Generate generic text for keyword matching based on media type
+                val mediaType = mediaAttachments.first().type
+                when (mediaType) {
                     MediaType.PHOTO -> "photo image picture"
                     MediaType.VIDEO -> "video clip recording"
                     MediaType.DOCUMENT -> "document file attachment"
                     MediaType.AUDIO -> "audio sound music"
                     MediaType.VOICE -> "voice message recording"
                     MediaType.ANIMATION -> "gif animation video"
+                    else -> "media attachment file" // Fallback for any new types
                 }
             } else {
                 plainText
@@ -407,7 +410,6 @@ class ChannelMonitor(
             }
         }
     }
-    
     
     /**
      * Unified MarkdownV2 conversion for all message types
