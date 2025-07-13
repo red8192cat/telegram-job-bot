@@ -110,7 +110,7 @@ class ChannelMonitor(
                 logger.debug { "Generated formatted text with ${formattedText.length - plainText.length} additional markup characters" }
             }
             
-            // ADDED: Download media attachments
+            // ADDED: Download media attachments with improved timeout
             logger.debug { "Downloading media attachments for message ${message.id}" }
             val mediaAttachments = mediaDownloader.downloadMessageMedia(message, client)
             
@@ -154,10 +154,10 @@ class ChannelMonitor(
             
             logger.info { "Message processing complete. Generated ${notifications.size} notifications" }
             
-            // Queue notifications (they now include media attachments)
-            for (notification in notifications) {
-                logger.debug { "Queueing notification for user ${notification.userId} with ${notification.mediaAttachments.size} attachments" }
-                bot?.queueNotification(notification)
+            // OPTIMIZED: Queue notifications as a batch for media reuse
+            if (notifications.isNotEmpty()) {
+                logger.debug { "Batch queueing ${notifications.size} notifications with ${mediaAttachments.size} attachments each" }
+                bot?.queueNotifications(notifications) // Use new batch method
             }
             
             logger.debug { "Processed message from monitored chat $channelId, generated ${notifications.size} notifications" }

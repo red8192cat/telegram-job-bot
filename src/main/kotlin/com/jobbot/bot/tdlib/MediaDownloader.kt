@@ -12,14 +12,15 @@ import java.util.*
 
 /**
  * Downloads media attachments from TDLib messages
- * Handles photos, videos, documents, and other media types
+ * FIXED: Improved timeout handling and added polling mechanism
  */
 class MediaDownloader {
     private val logger = getLogger("MediaDownloader")
     
     companion object {
         private const val MAX_FILE_SIZE = 50 * 1024 * 1024L // 50MB limit
-        private const val DOWNLOAD_TIMEOUT_MS = 30000L // 30 seconds per file
+        private const val DOWNLOAD_TIMEOUT_MS = 45000L // 45 seconds per file (increased)
+        private const val DOWNLOAD_POLL_INTERVAL_MS = 500L // Check every 500ms
         private const val TMP_DIR = "/tmp/jobbot_media"
     }
     
@@ -282,6 +283,7 @@ class MediaDownloader {
     
     /**
      * Download a file from TDLib
+     * FIXED: Improved polling mechanism with proper timeout handling
      * Returns local file path on success, null on failure
      */
     private suspend fun downloadFile(
@@ -301,46 +303,22 @@ class MediaDownloader {
                 when (result) {
                     is TdApi.File -> {
                         if (result.local.isDownloadingCompleted) {
-                            // File already downloaded or download completed
+                            // File already downloaded or download completed immediately
                             val sourcePath = result.local.path
                             
                             try {
                                 // Copy to our temp directory with desired name
                                 File(sourcePath).copyTo(File(localPath), overwrite = true)
-                                logger.debug { "File downloaded successfully: $localPath" }
+                                logger.debug { "File downloaded immediately: $localPath" }
                                 deferred.complete(localPath)
                             } catch (e: Exception) {
-                                logger.error(e) { "Failed to copy downloaded file" }
+                                logger.error(e) { "Failed to copy immediately downloaded file" }
                                 deferred.complete(null)
                             }
                         } else {
-                            // Download in progress or failed
-                            logger.debug { "Download not completed for fileId=$fileId" }
-                            
-                            // Wait a bit and check again
-                            client.send(TdApi.GetFile(fileId)) { fileResult ->
-                                when (fileResult) {
-                                    is TdApi.File -> {
-                                        if (fileResult.local.isDownloadingCompleted) {
-                                            try {
-                                                File(fileResult.local.path).copyTo(File(localPath), overwrite = true)
-                                                logger.debug { "File downloaded after retry: $localPath" }
-                                                deferred.complete(localPath)
-                                            } catch (e: Exception) {
-                                                logger.error(e) { "Failed to copy file after retry" }
-                                                deferred.complete(null)
-                                            }
-                                        } else {
-                                            logger.debug { "Download still not completed for fileId=$fileId" }
-                                            deferred.complete(null)
-                                        }
-                                    }
-                                    is TdApi.Error -> {
-                                        logger.warn { "Error getting file after download: ${fileResult.message}" }
-                                        deferred.complete(null)
-                                    }
-                                }
-                            }
+                            // Download started, need to poll for completion
+                            logger.debug { "Download started for fileId=$fileId, will poll for completion" }
+                            // Don't complete the deferred here, let the polling handle it
                         }
                     }
                     is TdApi.Error -> {
@@ -350,14 +328,59 @@ class MediaDownloader {
                 }
             }
             
-            // Wait for download with timeout
+            // Start polling for download completion
+            val pollJob = launch {
+                val pollStartTime = System.currentTimeMillis()
+                var pollCount = 0
+                
+                while (isActive && !deferred.isCompleted) {
+                    delay(DOWNLOAD_POLL_INTERVAL_MS)
+                    pollCount++
+                    
+                    if (System.currentTimeMillis() - pollStartTime > DOWNLOAD_TIMEOUT_MS) {
+                        logger.warn { "Download timeout for fileId=$fileId after ${pollCount} polls" }
+                        deferred.complete(null)
+                        break
+                    }
+                    
+                    // Check file status
+                    client.send(TdApi.GetFile(fileId)) { fileResult ->
+                        when (fileResult) {
+                            is TdApi.File -> {
+                                if (fileResult.local.isDownloadingCompleted) {
+                                    try {
+                                        File(fileResult.local.path).copyTo(File(localPath), overwrite = true)
+                                        logger.debug { "File downloaded after polling (${pollCount} polls): $localPath" }
+                                        deferred.complete(localPath)
+                                    } catch (e: Exception) {
+                                        logger.error(e) { "Failed to copy file after polling" }
+                                        deferred.complete(null)
+                                    }
+                                } else {
+                                    // Still downloading, continue polling
+                                    logger.debug { "Poll $pollCount: Download still in progress for fileId=$fileId" }
+                                }
+                            }
+                            is TdApi.Error -> {
+                                logger.warn { "Error getting file status during polling: ${fileResult.message}" }
+                                deferred.complete(null)
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Wait for download completion or timeout
             try {
-                withTimeout(DOWNLOAD_TIMEOUT_MS) {
+                withTimeout(DOWNLOAD_TIMEOUT_MS + 1000) { // Extra 1 second for cleanup
                     deferred.await()
                 }
             } catch (e: TimeoutCancellationException) {
-                logger.warn { "Download timeout for fileId=$fileId" }
+                logger.warn { "Overall download timeout for fileId=$fileId" }
+                pollJob.cancel()
                 null
+            } finally {
+                pollJob.cancel()
             }
             
         } catch (e: Exception) {

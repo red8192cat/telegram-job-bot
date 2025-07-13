@@ -24,17 +24,16 @@ import org.telegram.telegrambots.meta.api.objects.LinkPreviewOptions
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException
 import java.io.File
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * COMPLETE NotificationProcessor with Media Attachment Support
+ * ENHANCED NotificationProcessor with Media Reuse Optimization
  * 
- * Format:
- * 1. "New match from [channel]"
- * 2. Link to original post (if available)
- * 3. Original content with all formatting preserved
- * 4. Original media attachments (photos, videos, documents, etc.)
- * 
- * Strategy: Try MarkdownV2 first, fallback to plain text on API errors
+ * Features:
+ * - Reuses downloaded media for multiple users
+ * - Improved download timeout handling
+ * - Better error recovery
+ * - Media cleanup optimization
  */
 class NotificationProcessor(
     private val database: Database,
@@ -49,15 +48,27 @@ class NotificationProcessor(
     // Media downloader for cleanup operations
     private val mediaDownloader = MediaDownloader()
     
+    // ADDED: Media reuse tracking - keyed by original message content hash
+    private val mediaCache = ConcurrentHashMap<String, CachedMediaGroup>()
+    
     // Enhanced tracking
     private var markdownSuccess = 0
     private var plainFallback = 0
     private var totalNotifications = 0
     private var mediaNotifications = 0
+    private var mediaReusedCount = 0
+    
+    // Data class for cached media
+    private data class CachedMediaGroup(
+        val attachments: List<MediaAttachment>,
+        val createdTime: Long = System.currentTimeMillis(),
+        var useCount: Int = 0
+    )
     
     init {
         startNotificationProcessor()
         startPeriodicStatsLogging()
+        startMediaCacheCleanup()
     }
     
     fun queueNotification(notification: NotificationMessage) {
@@ -67,7 +78,7 @@ class NotificationProcessor(
                 logger.warn { "Notification queue full, dropping notification for user ${notification.userId}" }
                 // Clean up media files if notification was dropped
                 if (notification.mediaAttachments.isNotEmpty()) {
-                    mediaDownloader.cleanupMediaFiles(notification.mediaAttachments)
+                    scheduleMediaCleanup(notification.mediaAttachments)
                 }
             } else {
                 logger.debug { "Notification queued for user ${notification.userId} with ${notification.mediaAttachments.size} attachments" }
@@ -77,14 +88,54 @@ class NotificationProcessor(
             ErrorTracker.logError("ERROR", "Failed to queue notification: ${e.message}", e)
             // Clean up media files on error
             if (notification.mediaAttachments.isNotEmpty()) {
-                mediaDownloader.cleanupMediaFiles(notification.mediaAttachments)
+                scheduleMediaCleanup(notification.mediaAttachments)
             }
         }
     }
     
+    /**
+     * Queue multiple notifications efficiently - with media reuse optimization
+     */
+    fun queueNotifications(notifications: List<NotificationMessage>) {
+        if (notifications.isEmpty()) return
+        
+        // Check if we can reuse media for these notifications
+        val firstNotification = notifications.first()
+        if (firstNotification.mediaAttachments.isNotEmpty()) {
+            optimizeMediaForBatch(notifications)
+        }
+        
+        notifications.forEach { queueNotification(it) }
+    }
+    
+    /**
+     * Optimize media usage for a batch of notifications with the same media
+     */
+    private fun optimizeMediaForBatch(notifications: List<NotificationMessage>) {
+        val mediaAttachments = notifications.first().mediaAttachments
+        if (mediaAttachments.isEmpty()) return
+        
+        // Create a cache key based on media content
+        val cacheKey = createMediaCacheKey(notifications.first())
+        
+        // Cache the media group for reuse
+        mediaCache[cacheKey] = CachedMediaGroup(mediaAttachments, useCount = notifications.size)
+        
+        logger.debug { "Cached media group for ${notifications.size} notifications (key: ${cacheKey.take(8)}...)" }
+    }
+    
+    private fun createMediaCacheKey(notification: NotificationMessage): String {
+        // Create a unique key based on message content and media info
+        val contentHash = "${notification.messageText}-${notification.channelName}".hashCode()
+        val mediaInfo = notification.mediaAttachments.joinToString(",") { 
+            "${it.type}:${it.originalFileName}:${it.fileSize}" 
+        }
+        return "$contentHash-${mediaInfo.hashCode()}"
+    }
+    
     private fun startNotificationProcessor() {
         scope.launch {
-            logger.info { "Notification processor started with media attachment support" }
+            logger.info { "Notification processor started with media attachment support and reuse optimization" }
             
             while (isActive) {
                 try {
@@ -111,7 +162,7 @@ class NotificationProcessor(
     
     private suspend fun processNotification(notification: NotificationMessage) {
         totalNotifications++
-        var mediaCleanupNeeded = false
+        var shouldCleanupMedia = false
         
         try {
             // Check rate limiting
@@ -128,7 +179,7 @@ class NotificationProcessor(
             // Track media notifications
             if (notification.mediaAttachments.isNotEmpty()) {
                 mediaNotifications++
-                mediaCleanupNeeded = true
+                shouldCleanupMedia = true
                 logger.debug { "Processing notification with ${notification.mediaAttachments.size} media attachments" }
             }
             
@@ -141,10 +192,27 @@ class NotificationProcessor(
             
             if (success) {
                 logger.debug { "Notification delivered to user ${notification.userId}" }
-                mediaCleanupNeeded = true // Clean up on success
+                
+                // Check if this is the last user for this media group
+                val cacheKey = createMediaCacheKey(notification)
+                val cachedGroup = mediaCache[cacheKey]
+                if (cachedGroup != null) {
+                    cachedGroup.useCount--
+                    if (cachedGroup.useCount <= 0) {
+                        // Last user - safe to clean up
+                        mediaCache.remove(cacheKey)
+                        shouldCleanupMedia = true
+                        logger.debug { "Last user for media group, cleaning up" }
+                    } else {
+                        // Other users still need this media - don't clean up
+                        shouldCleanupMedia = false
+                        mediaReusedCount++
+                        logger.debug { "Media reused, ${cachedGroup.useCount} users remaining" }
+                    }
+                }
             } else {
                 logger.warn { "Failed to deliver notification to user ${notification.userId}" }
-                mediaCleanupNeeded = true // Clean up on failure too
+                shouldCleanupMedia = true
             }
 
         } catch (e: TelegramApiException) {
@@ -152,7 +220,7 @@ class NotificationProcessor(
             
             if (isUserUnreachableError(e)) {
                 logger.warn { "User ${notification.userId} is unreachable: ${e.message}" }
-                mediaCleanupNeeded = true
+                shouldCleanupMedia = true
             } else {
                 delay(10000)
                 notificationQueue.offer(notification)
@@ -161,13 +229,23 @@ class NotificationProcessor(
         } catch (e: Exception) {
             logger.error(e) { "Unexpected error for user ${notification.userId}" }
             ErrorTracker.logError("ERROR", "Notification processing error: ${e.message}", e)
-            mediaCleanupNeeded = true
+            shouldCleanupMedia = true
             
         } finally {
-            // Always clean up media files after processing
-            if (mediaCleanupNeeded && notification.mediaAttachments.isNotEmpty()) {
-                mediaDownloader.cleanupMediaFiles(notification.mediaAttachments)
+            // Clean up media files if this was the last user or on error
+            if (shouldCleanupMedia && notification.mediaAttachments.isNotEmpty()) {
+                scheduleMediaCleanup(notification.mediaAttachments)
             }
+        }
+    }
+    
+    /**
+     * Schedule media cleanup to run after a short delay (allows for reuse)
+     */
+    private fun scheduleMediaCleanup(attachments: List<MediaAttachment>) {
+        scope.launch {
+            delay(5000) // Wait 5 seconds before cleanup
+            mediaDownloader.cleanupMediaFiles(attachments)
         }
     }
     
@@ -294,7 +372,7 @@ class NotificationProcessor(
                 .parseMode("MarkdownV2")
                 .build()
             
-            withTimeout(5000) {
+            withTimeout(10000) { // Increased timeout for media
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendPhoto)
                 }
@@ -313,8 +391,10 @@ class NotificationProcessor(
                 .apply { if (!content.isNullOrBlank()) caption(content) }
                 .build()
             
-            withContext(Dispatchers.IO) {
-                telegramClient.execute(sendPhoto)
+            withTimeout(10000) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendPhoto)
+                }
             }
             true
         } catch (e: Exception) {
@@ -340,7 +420,7 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withTimeout(10000) {
+            withTimeout(15000) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendVideo)
                 }
@@ -364,8 +444,10 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withContext(Dispatchers.IO) {
-                telegramClient.execute(sendVideo)
+            withTimeout(15000) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendVideo)
+                }
             }
             true
         } catch (e: Exception) {
@@ -391,7 +473,7 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withTimeout(10000) {
+            withTimeout(15000) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendAnimation)
                 }
@@ -415,8 +497,10 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withContext(Dispatchers.IO) {
-                telegramClient.execute(sendAnimation)
+            withTimeout(15000) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendAnimation)
+                }
             }
             true
         } catch (e: Exception) {
@@ -437,7 +521,7 @@ class NotificationProcessor(
                 .parseMode("MarkdownV2")
                 .build()
             
-            withTimeout(15000) {
+            withTimeout(20000) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendDocument)
                 }
@@ -456,8 +540,10 @@ class NotificationProcessor(
                 .apply { if (!content.isNullOrBlank()) caption(content) }
                 .build()
             
-            withContext(Dispatchers.IO) {
-                telegramClient.execute(sendDocument)
+            withTimeout(20000) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendDocument)
+                }
             }
             true
         } catch (e: Exception) {
@@ -479,7 +565,7 @@ class NotificationProcessor(
                 .apply { attachment.duration?.let { duration(it) } }
                 .build()
             
-            withTimeout(15000) {
+            withTimeout(20000) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendAudio)
                 }
@@ -501,8 +587,10 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withContext(Dispatchers.IO) {
-                telegramClient.execute(sendAudio)
+            withTimeout(20000) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendAudio)
+                }
             }
             true
         } catch (e: Exception) {
@@ -524,7 +612,7 @@ class NotificationProcessor(
                 .apply { attachment.duration?.let { duration(it) } }
                 .build()
             
-            withTimeout(10000) {
+            withTimeout(15000) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendVoice)
                 }
@@ -546,8 +634,10 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withContext(Dispatchers.IO) {
-                telegramClient.execute(sendVoice)
+            withTimeout(15000) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendVoice)
+                }
             }
             true
         } catch (e: Exception) {
@@ -590,14 +680,12 @@ class NotificationProcessor(
             }
             
             // For MarkdownV2 links, properly escape only the content inside the link text
-            // Do NOT escape [ and ] as they are part of the link syntax [text](url)
             val safeLinkText = linkDisplayText
                 .replace("\\", "\\\\")  // Escape backslashes first
                 .replace("_", "\\_")    // Escape underscores (could start italic)
                 .replace("*", "\\*")    // Escape asterisks (could start bold)
                 .replace("`", "\\`")    // Escape backticks (could start code)
                 .replace("~", "\\~")    // Escape tildes (could start strikethrough)
-                // Note: [ and ] are NOT escaped here because they're part of link syntax
             
             val escapedUrl = TelegramMarkdownConverter.escapeUrlInLink(notification.messageLink)
             val markdownLink = "[$safeLinkText]($escapedUrl)"
@@ -614,11 +702,7 @@ class NotificationProcessor(
             
             markdownParts.add(finalHeader)
             
-            logger.debug { "Raw template: $rawTemplate" }
-            logger.debug { "Template with placeholder: $templateWithPlaceholder" }
-            logger.debug { "Escaped template: $escapedTemplate" }
             logger.debug { "Created MarkdownV2 link: $markdownLink" }
-            logger.debug { "Final header: $finalHeader" }
         } else {
             // No link available, use plain header
             val header = Localization.getMessage(language, "notification.job.match.header", channelName)
@@ -666,7 +750,7 @@ class NotificationProcessor(
                 .linkPreviewOptions(LinkPreviewOptions.builder().isDisabled(true).build())
                 .build()
             
-            withTimeout(3000) {
+            withTimeout(5000) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(markdownMessage)
                 }
@@ -745,7 +829,41 @@ class NotificationProcessor(
     }
     
     /**
-     * Enhanced statistics logging with media tracking
+     * Start media cache cleanup - removes old cached media groups
+     */
+    private fun startMediaCacheCleanup() {
+        scope.launch {
+            while (isActive) {
+                delay(300000) // Every 5 minutes
+                
+                try {
+                    val currentTime = System.currentTimeMillis()
+                    val expiredKeys = mediaCache.entries
+                        .filter { (_, group) -> currentTime - group.createdTime > 600000 } // 10 minutes old
+                        .map { it.key }
+                    
+                    expiredKeys.forEach { key ->
+                        val removedGroup = mediaCache.remove(key)
+                        if (removedGroup != null) {
+                            logger.debug { "Expired media cache entry: ${key.take(8)}..." }
+                            // Clean up any remaining files
+                            scheduleMediaCleanup(removedGroup.attachments)
+                        }
+                    }
+                    
+                    if (expiredKeys.isNotEmpty()) {
+                        logger.debug { "Cleaned up ${expiredKeys.size} expired media cache entries" }
+                    }
+                    
+                } catch (e: Exception) {
+                    logger.warn(e) { "Error during media cache cleanup" }
+                }
+            }
+        }
+    }
+    
+    /**
+     * Enhanced statistics logging with media reuse tracking
      */
     private fun startPeriodicStatsLogging() {
         scope.launch {
@@ -758,7 +876,8 @@ class NotificationProcessor(
                     
                     logger.debug { 
                         "📊 Notification stats: $successRate% MarkdownV2 success, $mediaRate% with media " +
-                        "($markdownSuccess formatted, $plainFallback plain, $mediaNotifications media, $totalNotifications total)"
+                        "($markdownSuccess formatted, $plainFallback plain, $mediaNotifications media, " +
+                        "$mediaReusedCount reused, $totalNotifications total, cache: ${mediaCache.size})"
                     }
                 }
             }
@@ -773,6 +892,8 @@ class NotificationProcessor(
             "markdownSuccess" to markdownSuccess,
             "plainFallback" to plainFallback,
             "mediaNotifications" to mediaNotifications,
+            "mediaReused" to mediaReusedCount,
+            "mediaCacheSize" to mediaCache.size,
             "successRate" to if (totalNotifications > 0) (markdownSuccess * 100 / totalNotifications) else 0,
             "mediaRate" to if (totalNotifications > 0) (mediaNotifications * 100 / totalNotifications) else 0
         )
@@ -787,7 +908,8 @@ class NotificationProcessor(
             
             logger.debug { 
                 "📊 Final stats: $successRate% MarkdownV2 success, $mediaRate% with media " +
-                "($markdownSuccess formatted, $plainFallback plain, $mediaNotifications media, $totalNotifications total)"
+                "($markdownSuccess formatted, $plainFallback plain, $mediaNotifications media, " +
+                "$mediaReusedCount reused, $totalNotifications total)"
             }
         }
         
@@ -801,8 +923,14 @@ class NotificationProcessor(
             }
         }
         
+        // Clean up cached media
+        mediaCache.values.forEach { group ->
+            mediaDownloader.cleanupMediaFiles(group.attachments)
+        }
+        mediaCache.clear()
+        
         if (remainingNotifications.isNotEmpty()) {
-            logger.info { "Cleaned up ${remainingNotifications.size} queued notifications during shutdown" }
+            logger.info { "Cleaned up ${remainingNotifications.size} queued notifications and ${mediaCache.size} cached media groups during shutdown" }
         }
         
         scope.cancel()

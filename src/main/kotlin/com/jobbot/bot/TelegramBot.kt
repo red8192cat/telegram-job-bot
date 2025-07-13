@@ -179,6 +179,10 @@ class TelegramBot(
         notificationProcessor.queueNotification(notification)
     }
     
+    fun queueNotifications(notifications: List<NotificationMessage>) {
+        notificationProcessor.queueNotifications(notifications)
+    }
+
     fun sendAdminNotification(message: String) {
         scope.launch {
             try {
