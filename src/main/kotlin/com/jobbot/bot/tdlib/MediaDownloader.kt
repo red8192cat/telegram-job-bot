@@ -418,40 +418,53 @@ class MediaDownloader {
             
             logger.debug { "TDLib reports file at: '$tdlibSourcePath' (verified size: $expectedSize bytes)" }
             
-            // ENHANCED: First try to access the TDLib file directly with retry logic
+            // ENHANCED: Try to access the TDLib file directly with UTF-8 filename handling
             val tdlibFile = File(tdlibSourcePath)
             
-            // Try multiple times to access the file (filesystem sync issue)
-            var fileAccessAttempts = 0
-            var actualFile: File? = null
+            // Strategy 1: Direct file access (works if path is correct)
+            if (tdlibFile.exists() && tdlibFile.length() == expectedSize && tdlibFile.length() > 0) {
+                logger.info { "✅ TDLib file accessible directly: ${getSafeFilename(tdlibFile)} (${tdlibFile.length()} bytes)" }
+                copyFileToTarget(tdlibFile, targetPath, deferred)
+                return
+            }
             
-            while (fileAccessAttempts < 5 && actualFile == null) {
-                fileAccessAttempts++
+            // Strategy 2: Try UTF-8 filename variations in the same directory
+            val parentDir = File(tdlibSourcePath).parentFile
+            val expectedFilename = File(tdlibSourcePath).name
+            
+            if (parentDir?.exists() == true) {
+                logger.debug { "Direct access failed, searching directory for UTF-8 filename variations" }
                 
-                if (tdlibFile.exists()) {
-                    val fileSize = tdlibFile.length()
-                    logger.debug { "TDLib file attempt $fileAccessAttempts: exists=${tdlibFile.exists()}, size=$fileSize/$expectedSize, readable=${tdlibFile.canRead()}" }
+                // Look for files with the exact size (the cached file should be there)
+                val sizeMatches = parentDir.listFiles()?.filter { file ->
+                    file.isFile && 
+                    file.length() == expectedSize &&
+                    file.length() > 0 &&
+                    file.canRead()
+                }
+                
+                if (sizeMatches?.isNotEmpty() == true) {
+                    logger.debug { "Found ${sizeMatches.size} files with correct size" }
                     
-                    if (fileSize == expectedSize && fileSize > 0 && tdlibFile.canRead()) {
-                        actualFile = tdlibFile
-                        logger.info { "✅ TDLib file accessible directly: ${getSafeFilename(tdlibFile)} (${tdlibFile.length()} bytes)" }
-                        break
-                    } else if (fileSize == 0L) {
-                        logger.debug { "File exists but size is 0, waiting for filesystem sync..." }
-                        Thread.sleep(200) // Wait 200ms for filesystem sync
+                    // Try UTF-8 filename matching strategies
+                    val matchedFile = tryUtf8FilenameMatching(sizeMatches, expectedFilename)
+                    
+                    if (matchedFile != null) {
+                        logger.info { "✅ Found cached file via UTF-8 matching: ${getSafeFilename(matchedFile)} (${matchedFile.length()} bytes)" }
+                        copyFileToTarget(matchedFile, targetPath, deferred)
+                        return
+                    } else {
+                        // Use the first size match as fallback (it's very likely the right file)
+                        val fallbackFile = sizeMatches.first()
+                        logger.warn { "⚠️ Using size-match fallback: ${getSafeFilename(fallbackFile)} (${fallbackFile.length()} bytes)" }
+                        copyFileToTarget(fallbackFile, targetPath, deferred)
+                        return
                     }
-                } else {
-                    logger.debug { "TDLib file doesn't exist yet, waiting..." }
-                    Thread.sleep(200)
                 }
             }
             
-            if (actualFile != null) {
-                copyFileToTarget(actualFile, targetPath, deferred)
-                return
-            } else {
-                logger.warn { "TDLib file not accessible after $fileAccessAttempts attempts - trying directory search" }
-            }
+            logger.warn { "TDLib file not accessible and no size matches found - this should not happen" }
+            deferred.complete(null)
             
             // Extract expected filename from TDLib path
             val expectedFilename = File(tdlibSourcePath).name
@@ -466,16 +479,30 @@ class MediaDownloader {
             
             logger.debug { "Searching in directory: ${parentDir.absolutePath}" }
             
-            // ENHANCED: Find file using multiple UTF-8 matching strategies
-            val matchingFile = findFileWithProperUtf8Matching(parentDir, expectedFilename, expectedSize)
+            // SIMPLIFIED: Just find files with the correct size and try UTF-8 matching
+            val sizeMatches = parentDir.listFiles()?.filter { file ->
+                file.isFile && 
+                file.length() == expectedSize &&
+                file.length() > 0 &&
+                file.canRead()
+            }
             
-            if (matchingFile != null) {
-                logger.info { "Found matching file: ${getSafeFilename(matchingFile)} (${matchingFile.length()} bytes)" }
-                copyFileToTarget(matchingFile, targetPath, deferred)
-            } else {
-                logger.warn { "Could not find matching file in directory" }
+            if (sizeMatches?.isNotEmpty() == true) {
+                logger.debug { "Found ${sizeMatches.size} files with correct size ${expectedSize}" }
                 
-                // Debug: show what files are actually there
+                val matchedFile = tryUtf8FilenameMatching(sizeMatches, expectedFilename)
+                
+                if (matchedFile != null) {
+                    logger.info { "Found matching file: ${getSafeFilename(matchedFile)} (${matchedFile.length()} bytes)" }
+                    copyFileToTarget(matchedFile, targetPath, deferred)
+                } else {
+                    // Use first size match as fallback
+                    val fallbackFile = sizeMatches.first()
+                    logger.warn { "Using size-match fallback: ${getSafeFilename(fallbackFile)} (${fallbackFile.length()} bytes)" }
+                    copyFileToTarget(fallbackFile, targetPath, deferred)
+                }
+            } else {
+                logger.warn { "No files found with correct size $expectedSize" }
                 logDirectoryContents(parentDir, expectedSize)
                 deferred.complete(null)
             }
@@ -487,8 +514,71 @@ class MediaDownloader {
     }
     
     /**
-     * Find file using multiple UTF-8 matching strategies
+     * Try UTF-8 filename matching strategies for cached files
      */
+    private fun tryUtf8FilenameMatching(candidates: List<File>, expectedFilename: String): File? {
+        logger.debug { "Trying UTF-8 filename matching for: '$expectedFilename'" }
+        
+        // Strategy 1: Direct filename match
+        candidates.forEach { file ->
+            if (file.name == expectedFilename) {
+                logger.debug { "✅ Direct filename match: ${getSafeFilename(file)}" }
+                return file
+            }
+        }
+        
+        // Strategy 2: UTF-8 reinterpretation (most likely to work for Cyrillic)
+        candidates.forEach { file ->
+            try {
+                val reinterpreted = String(file.name.toByteArray(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8)
+                if (reinterpreted == expectedFilename) {
+                    logger.debug { "✅ UTF-8 reinterpretation match: ${getSafeFilename(file)}" }
+                    return file
+                }
+            } catch (e: Exception) {
+                logger.debug { "Error in UTF-8 reinterpretation for: ${getSafeFilename(file)}" }
+            }
+        }
+        
+        // Strategy 3: Reverse reinterpretation
+        candidates.forEach { file ->
+            try {
+                val reverseReinterpreted = String(expectedFilename.toByteArray(StandardCharsets.UTF_8), StandardCharsets.ISO_8859_1)
+                if (file.name == reverseReinterpreted) {
+                    logger.debug { "✅ Reverse UTF-8 reinterpretation match: ${getSafeFilename(file)}" }
+                    return file
+                }
+            } catch (e: Exception) {
+                logger.debug { "Error in reverse UTF-8 reinterpretation" }
+            }
+        }
+        
+        // Strategy 4: Normalized comparison
+        val normalizedExpected = normalizeFilename(expectedFilename)
+        candidates.forEach { file ->
+            val normalizedActual = normalizeFilename(file.name)
+            if (normalizedActual == normalizedExpected) {
+                logger.debug { "✅ Normalized filename match: ${getSafeFilename(file)}" }
+                return file
+            }
+        }
+        
+        // Strategy 5: Extension matching (last resort)
+        val expectedExtension = getFileExtension(expectedFilename)
+        if (expectedExtension != null) {
+            val extensionMatches = candidates.filter { file ->
+                getFileExtension(file.name) == expectedExtension
+            }
+            
+            if (extensionMatches.size == 1) {
+                logger.debug { "✅ Single extension match: ${getSafeFilename(extensionMatches.first())}" }
+                return extensionMatches.first()
+            }
+        }
+        
+        logger.debug { "❌ No UTF-8 filename matches found" }
+        return null
+    }
     private fun findFileWithProperUtf8Matching(
         directory: File,
         expectedFilename: String,
