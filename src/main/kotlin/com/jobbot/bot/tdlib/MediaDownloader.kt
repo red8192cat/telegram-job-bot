@@ -8,14 +8,11 @@ import kotlinx.coroutines.*
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 import java.io.File
-import java.nio.charset.Charset
-import java.nio.charset.StandardCharsets
-import java.text.Normalizer
 import java.util.*
 
 /**
  * Downloads media attachments from TDLib messages
- * ENHANCED: Robust filename handling for Docker containers with Unicode filenames
+ * ENHANCED: Proper UTF-8 encoding support for Unicode filenames
  */
 class MediaDownloader {
     private val logger = getLogger("MediaDownloader")
@@ -26,6 +23,9 @@ class MediaDownloader {
         private const val DOWNLOAD_POLL_INTERVAL_MS = 500L // Check every 500ms
         private const val MAX_POLL_ATTEMPTS = 90 // 45 seconds / 500ms
         private const val TMP_DIR = "/tmp/jobbot_media"
+        
+        @JvmStatic
+        private var utf8Verified = false
     }
     
     init {
@@ -454,7 +454,7 @@ class MediaDownloader {
      */
     private fun verifyUtf8Configuration() {
         // Only run this check once per instance
-        if (this::class.java.getField("utf8Verified").getBoolean(null)) return
+        if (utf8Verified) return
         
         val fileEncoding = System.getProperty("file.encoding")
         val sunJnuEncoding = System.getProperty("sun.jnu.encoding")
@@ -473,16 +473,7 @@ class MediaDownloader {
         }
         
         // Mark as checked
-        try {
-            this::class.java.getDeclaredField("utf8Verified").setBoolean(null, true)
-        } catch (e: Exception) {
-            // Create the field if it doesn't exist (this is just for one-time checking)
-        }
-    }
-    
-    companion object {
-        @JvmStatic
-        private var utf8Verified = false
+        utf8Verified = true
     }
     
     /**
@@ -641,619 +632,7 @@ class MediaDownloader {
     }
     
     /**
-     * JVM encoding diagnostic to understand the encoding issue
-     */
-    private fun diagnoseJvmEncoding(directory: File) {
-        logger.info { "=== JVM ENCODING DIAGNOSTIC ===" }
-        
-        try {
-            // Check JVM encoding settings
-            val fileEncoding = System.getProperty("file.encoding")
-            val sunJnuEncoding = System.getProperty("sun.jnu.encoding")
-            val osName = System.getProperty("os.name")
-            val userLanguage = System.getProperty("user.language")
-            val userCountry = System.getProperty("user.country")
-            val defaultCharset = java.nio.charset.Charset.defaultCharset()
-            
-            logger.info { "JVM Encoding Settings:" }
-            logger.info { "  file.encoding: $fileEncoding" }
-            logger.info { "  sun.jnu.encoding: $sunJnuEncoding" }
-            logger.info { "  os.name: $osName" }
-            logger.info { "  user.language: $userLanguage" }
-            logger.info { "  user.country: $userCountry" }
-            logger.info { "  Charset.defaultCharset(): $defaultCharset" }
-            
-            // Test different encoding approaches for the directory
-            logger.info { "Directory listing approaches:" }
-            
-            // Approach 1: Standard Java
-            try {
-                val javaFiles = directory.listFiles()
-                logger.info { "  Java listFiles(): ${javaFiles?.size ?: 0} files" }
-                javaFiles?.forEach { file ->
-                    logger.info { "    File: '${file.name}' (${file.length()} bytes)" }
-                }
-            } catch (e: Exception) {
-                logger.warn { "  Java listFiles() failed: ${e.message}" }
-            }
-            
-            // Approach 2: NIO with different charsets
-            val charsets = listOf(
-                "UTF-8",
-                "ISO-8859-1", 
-                "CP1251", // Cyrillic
-                "UTF-16",
-                "US-ASCII"
-            )
-            
-            for (charset in charsets) {
-                try {
-                    val path = java.nio.file.Paths.get(directory.absolutePath)
-                    val stream = java.nio.file.Files.newDirectoryStream(path)
-                    val files = stream.use { it.toList() }
-                    
-                    logger.info { "  NIO with $charset: ${files.size} files" }
-                    files.forEach { filePath ->
-                        val fileName = filePath.fileName.toString()
-                        val fileSize = try { java.nio.file.Files.size(filePath) } catch (e: Exception) { -1L }
-                        logger.info { "    File: '$fileName' ($fileSize bytes)" }
-                    }
-                } catch (e: Exception) {
-                    logger.warn { "  NIO with $charset failed: ${e.message}" }
-                }
-            }
-            
-            // Approach 3: Test specific encoding conversion on the problematic filename
-            val problematicPath = "/app/data/bot.db_tdlib/music/Демоны   Три дня дождя.mp3"
-            logger.info { "  Testing problematic filename encoding:" }
-            logger.info { "    Original: '$problematicPath'" }
-            
-            for (charset in charsets) {
-                try {
-                    val bytes = problematicPath.toByteArray(java.nio.charset.Charset.forName(charset))
-                    val reconstructed = String(bytes, java.nio.charset.Charset.forName(charset))
-                    val match = reconstructed == problematicPath
-                    logger.info { "    $charset: match=$match, reconstructed='$reconstructed'" }
-                    
-                    // Test if file exists with this encoding
-                    val testFile = File(reconstructed)
-                    logger.info { "      File exists with this encoding: ${testFile.exists()}" }
-                } catch (e: Exception) {
-                    logger.warn { "    $charset conversion failed: ${e.message}" }
-                }
-            }
-            
-        } catch (e: Exception) {
-            logger.error(e) { "Error in JVM encoding diagnostic" }
-        }
-        
-        logger.info { "=== END JVM ENCODING DIAGNOSTIC ===" }
-    }
-    
-    /**
-     * Find file using proper Java encoding techniques
-     */
-    private fun findFileWithProperEncoding(directory: File, expectedSize: Long): File? {
-        logger.info { "Searching for file with proper encoding..." }
-        
-        try {
-            // Strategy 1: Use NIO with explicit UTF-8 handling
-            val path = java.nio.file.Paths.get(directory.absolutePath)
-            val files = java.nio.file.Files.newDirectoryStream(path).use { stream ->
-                stream.filter { filePath ->
-                    try {
-                        val size = java.nio.file.Files.size(filePath)
-                        size == expectedSize
-                    } catch (e: Exception) {
-                        false
-                    }
-                }.toList()
-            }
-            
-            if (files.isNotEmpty()) {
-                val bestFile = files.first()
-                logger.info { "Found file via NIO: ${bestFile.fileName}" }
-                return bestFile.toFile()
-            }
-            
-            // Strategy 2: Try directory listing with encoding correction
-            val javaFiles = directory.listFiles()
-            if (javaFiles != null) {
-                for (file in javaFiles) {
-                    try {
-                        if (file.length() == expectedSize) {
-                            // Test if we can actually read this file
-                            file.inputStream().use { stream ->
-                                val testByte = stream.read()
-                                if (testByte != -1) {
-                                    logger.info { "Found readable file via Java: ${file.name}" }
-                                    return file
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        logger.debug { "File not accessible: ${e.message}" }
-                    }
-                }
-            }
-            
-            // Strategy 3: Create file handle with corrected encoding
-            // This handles the case where TDLib path has encoding issues
-            try {
-                // Try to reconstruct the correct path by fixing encoding
-                val originalPath = "/app/data/bot.db_tdlib/music/Демоны   Три дня дождя.mp3"
-                
-                // Convert to bytes and back with different encodings
-                val encodings = listOf("UTF-8", "ISO-8859-1", "CP1251")
-                
-                for (encoding in encodings) {
-                    try {
-                        val pathBytes = originalPath.toByteArray(java.nio.charset.Charset.forName("UTF-8"))
-                        val correctedPath = String(pathBytes, java.nio.charset.Charset.forName(encoding))
-                        
-                        val testFile = File(correctedPath)
-                        if (testFile.exists() && testFile.length() == expectedSize) {
-                            logger.info { "Found file with encoding correction ($encoding): ${testFile.absolutePath}" }
-                            return testFile
-                        }
-                    } catch (e: Exception) {
-                        logger.debug { "Encoding $encoding failed: ${e.message}" }
-                    }
-                }
-            } catch (e: Exception) {
-                logger.debug { "Encoding correction failed: ${e.message}" }
-            }
-            
-        } catch (e: Exception) {
-            logger.error(e) { "Error in findFileWithProperEncoding" }
-        }
-        
-        logger.warn { "Could not find file with any encoding approach" }
-        return null
-    }
-    
-    /**
-     * Find and copy file by properties (size, modification time) instead of filename
-     */
-    private fun findAndCopyFileByProperties(
-        directory: File,
-        expectedSize: Long,
-        targetPath: String,
-        deferred: CompletableDeferred<String?>
-    ): Boolean {
-        try {
-            logger.info { "Searching for file with size $expectedSize bytes in directory: ${directory.absolutePath}" }
-            
-            // Use external command to list files with sizes and timestamps
-            val lsProcess = ProcessBuilder("ls", "-la", "--time-style=+%s", directory.absolutePath)
-                .redirectErrorStream(true)
-                .start()
-            
-            val lsOutput = lsProcess.inputStream.bufferedReader().readText()
-            val lsExitCode = lsProcess.waitFor()
-            
-            if (lsExitCode != 0) {
-                logger.warn { "ls command failed with exit code $lsExitCode: $lsOutput" }
-                return false
-            }
-            
-            logger.debug { "ls output: $lsOutput" }
-            
-            // Parse ls output to find files with correct size
-            val lines = lsOutput.trim().split('\n')
-            val candidates = mutableListOf<FileCandidate>()
-            
-            for (line in lines) {
-                if (line.startsWith("total ") || line.startsWith("d")) continue // Skip directory entries
-                
-                try {
-                    // Parse ls output: permissions user group size timestamp filename
-                    val parts = line.trim().split(Regex("\\s+"), 9)
-                    if (parts.size >= 6) {
-                        val size = parts[4].toLongOrNull()
-                        val timestamp = parts[5].toLongOrNull() ?: 0L
-                        val filename = if (parts.size >= 9) parts.subList(6, parts.size).joinToString(" ") else "unknown"
-                        
-                        if (size == expectedSize) {
-                            candidates.add(FileCandidate(filename, size, timestamp))
-                            logger.info { "Found size match: filename='$filename', size=$size, timestamp=$timestamp" }
-                        }
-                    }
-                } catch (e: Exception) {
-                    logger.debug { "Error parsing ls line: $line - ${e.message}" }
-                }
-            }
-            
-            if (candidates.isEmpty()) {
-                logger.warn { "No files found with expected size $expectedSize" }
-                return false
-            }
-            
-            // Sort by timestamp (newest first) to get the most recently downloaded file
-            candidates.sortByDescending { it.timestamp }
-            val bestCandidate = candidates.first()
-            
-            logger.info { "Best candidate: ${bestCandidate.filename} (size: ${bestCandidate.size}, age: ${System.currentTimeMillis() / 1000 - bestCandidate.timestamp}s)" }
-            
-            // Copy using external command to avoid encoding issues
-            return copyFileUsingCommand(directory, bestCandidate.filename, targetPath, deferred)
-            
-        } catch (e: Exception) {
-            logger.error(e) { "Error in findAndCopyFileByProperties" }
-            return false
-        }
-    }
-    
-    /**
-     * Copy file using external command to bypass Java encoding issues
-     */
-    private fun copyFileUsingCommand(
-        sourceDir: File,
-        filename: String,
-        targetPath: String,
-        deferred: CompletableDeferred<String?>
-    ): Boolean {
-        try {
-            val targetFile = File(targetPath)
-            targetFile.parentFile?.mkdirs()
-            
-            logger.info { "Copying file using external command..." }
-            logger.debug { "Source dir: ${sourceDir.absolutePath}" }
-            logger.debug { "Filename: $filename" }
-            logger.debug { "Target: $targetPath" }
-            
-            // Change to source directory and copy by relative filename to avoid encoding issues
-            val copyProcess = ProcessBuilder("sh", "-c", "cd '${sourceDir.absolutePath}' && cp * '$targetPath'")
-                .redirectErrorStream(true)
-                .start()
-            
-            val copyOutput = copyProcess.inputStream.bufferedReader().readText()
-            val copyExitCode = copyProcess.waitFor()
-            
-            if (copyExitCode == 0) {
-                // Verify the copied file
-                if (targetFile.exists() && targetFile.length() > 0) {
-                    // Test readability
-                    try {
-                        targetFile.inputStream().use { stream ->
-                            val testBytes = stream.readNBytes(1024)
-                            if (testBytes.isNotEmpty()) {
-                                logger.info { "✅ File successfully copied using external command (${targetFile.length()} bytes)" }
-                                deferred.complete(targetPath)
-                                return true
-                            }
-                        }
-                    } catch (e: Exception) {
-                        logger.warn { "Copied file is not readable: ${e.message}" }
-                    }
-                } else {
-                    logger.warn { "Copy succeeded but file verification failed: exists=${targetFile.exists()}, size=${targetFile.length()}" }
-                }
-            } else {
-                logger.warn { "Copy command failed with exit code $copyExitCode: $copyOutput" }
-            }
-            
-        } catch (e: Exception) {
-            logger.error(e) { "Error copying file using command" }
-        }
-        
-        return false
-    }
-    
-    /**
-     * Data class for file candidates found via directory listing
-     */
-    private data class FileCandidate(
-        val filename: String,
-        val size: Long,
-        val timestamp: Long
-    )
-    
-    /**
-     * Comprehensive permission debugging to understand the root cause
-     */
-    private fun debugPermissions(filePath: String, expectedSize: Long) {
-        logger.info { "=== PERMISSION DEBUGGING ===" }
-        
-        try {
-            // Check what user our Java process is running as
-            val currentUser = System.getProperty("user.name")
-            val userHome = System.getProperty("user.home")
-            val javaVersion = System.getProperty("java.version")
-            
-            logger.info { "Java process info:" }
-            logger.info { "  user.name: $currentUser" }
-            logger.info { "  user.home: $userHome" }
-            logger.info { "  java.version: $javaVersion" }
-            
-            // Get system user info via external command
-            try {
-                val whoamiProcess = ProcessBuilder("whoami").start()
-                val whoamiResult = whoamiProcess.inputStream.bufferedReader().readText().trim()
-                logger.info { "  whoami result: $whoamiResult" }
-                
-                val idProcess = ProcessBuilder("id").start()
-                val idResult = idProcess.inputStream.bufferedReader().readText().trim()
-                logger.info { "  id result: $idResult" }
-            } catch (e: Exception) {
-                logger.warn { "Could not get system user info: ${e.message}" }
-            }
-            
-            // Analyze the specific file
-            val file = File(filePath)
-            logger.info { "File analysis for: $filePath" }
-            logger.info { "  file.exists(): ${file.exists()}" }
-            logger.info { "  file.isFile(): ${file.isFile()}" }
-            logger.info { "  file.canRead(): ${file.canRead()}" }
-            logger.info { "  file.canWrite(): ${file.canWrite()}" }
-            logger.info { "  file.length(): ${file.length()}" }
-            logger.info { "  expected size: $expectedSize" }
-            
-            // Get detailed file info via ls command
-            try {
-                val lsProcess = ProcessBuilder("ls", "-la", filePath).start()
-                val lsResult = lsProcess.inputStream.bufferedReader().readText().trim()
-                logger.info { "  ls -la result: $lsResult" }
-            } catch (e: Exception) {
-                logger.warn { "Could not get ls info: ${e.message}" }
-            }
-            
-            // Get file ownership details via stat command
-            try {
-                val statProcess = ProcessBuilder("stat", "-c", "%n %s %U:%G %a", filePath).start()
-                val statResult = statProcess.inputStream.bufferedReader().readText().trim()
-                logger.info { "  stat result: $statResult" }
-            } catch (e: Exception) {
-                logger.warn { "Could not get stat info: ${e.message}" }
-            }
-            
-            // Check directory permissions
-            val parentDir = file.parentFile
-            if (parentDir != null) {
-                logger.info { "Parent directory analysis: ${parentDir.absolutePath}" }
-                logger.info { "  dir.exists(): ${parentDir.exists()}" }
-                logger.info { "  dir.canRead(): ${parentDir.canRead()}" }
-                logger.info { "  dir.canExecute(): ${parentDir.canExecute()}" }
-                
-                try {
-                    val dirLsProcess = ProcessBuilder("ls", "-lad", parentDir.absolutePath).start()
-                    val dirLsResult = dirLsProcess.inputStream.bufferedReader().readText().trim()
-                    logger.info { "  dir ls -lad result: $dirLsResult" }
-                } catch (e: Exception) {
-                    logger.warn { "Could not get directory ls info: ${e.message}" }
-                }
-            }
-            
-            // Test actual file access with different methods
-            logger.info { "File access testing:" }
-            
-            // Test 1: Basic FileInputStream
-            try {
-                file.inputStream().use { stream ->
-                    val firstByte = stream.read()
-                    logger.info { "  FileInputStream test: SUCCESS (first byte: $firstByte)" }
-                }
-            } catch (e: Exception) {
-                logger.warn { "  FileInputStream test: FAILED - ${e.javaClass.simpleName}: ${e.message}" }
-            }
-            
-            // Test 2: Files.readAllBytes
-            try {
-                val bytes = java.nio.file.Files.readAllBytes(file.toPath())
-                logger.info { "  Files.readAllBytes test: SUCCESS (${bytes.size} bytes)" }
-            } catch (e: Exception) {
-                logger.warn { "  Files.readAllBytes test: FAILED - ${e.javaClass.simpleName}: ${e.message}" }
-            }
-            
-            // Test 3: RandomAccessFile
-            try {
-                java.io.RandomAccessFile(file, "r").use { raf ->
-                    val length = raf.length()
-                    logger.info { "  RandomAccessFile test: SUCCESS ($length bytes)" }
-                }
-            } catch (e: Exception) {
-                logger.warn { "  RandomAccessFile test: FAILED - ${e.javaClass.simpleName}: ${e.message}" }
-            }
-            
-            // Test 4: Check if it's a special file type
-            try {
-                val path = file.toPath()
-                val attrs = java.nio.file.Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java)
-                logger.info { "  File attributes:" }
-                logger.info { "    isRegularFile: ${attrs.isRegularFile}" }
-                logger.info { "    isDirectory: ${attrs.isDirectory}" }
-                logger.info { "    isSymbolicLink: ${attrs.isSymbolicLink}" }
-                logger.info { "    size: ${attrs.size()}" }
-                logger.info { "    lastModified: ${attrs.lastModifiedTime()}" }
-            } catch (e: Exception) {
-                logger.warn { "  File attributes test: FAILED - ${e.javaClass.simpleName}: ${e.message}" }
-            }
-            
-        } catch (e: Exception) {
-            logger.error(e) { "Error during permission debugging" }
-        }
-        
-        logger.info { "=== END PERMISSION DEBUGGING ===" }
-    }
-    
-    /**
-     * Try direct file access with detailed error reporting
-     */
-    private fun tryDirectFileAccess(
-        directFile: File, 
-        expectedSize: Long, 
-        targetPath: String, 
-        deferred: CompletableDeferred<String?>
-    ): Boolean {
-        logger.info { "Attempting direct file access..." }
-        
-        try {
-            if (!directFile.exists()) {
-                logger.warn { "File does not exist: ${directFile.absolutePath}" }
-                return false
-            }
-            
-            if (!directFile.isFile()) {
-                logger.warn { "Path is not a regular file: ${directFile.absolutePath}" }
-                return false
-            }
-            
-            val actualSize = directFile.length()
-            logger.info { "File size check: actual=$actualSize, expected=$expectedSize" }
-            
-            if (actualSize != expectedSize) {
-                logger.warn { "File size mismatch: expected $expectedSize, got $actualSize" }
-                return false
-            }
-            
-            if (actualSize == 0L) {
-                logger.warn { "File has 0 bytes" }
-                return false
-            }
-            
-            // Test actual read access
-            directFile.inputStream().use { stream ->
-                val buffer = ByteArray(1024)
-                val bytesRead = stream.read(buffer)
-                if (bytesRead > 0) {
-                    logger.info { "✅ Direct file access successful: read $bytesRead bytes" }
-                    copyFileToTarget(directFile, targetPath, deferred)
-                    return true
-                } else {
-                    logger.warn { "File read returned 0 bytes despite file size $actualSize" }
-                    return false
-                }
-            }
-        } catch (e: Exception) {
-            logger.warn { "Direct file access failed: ${e.javaClass.simpleName} - ${e.message}" }
-            return false
-        }
-    }
-    
-    /**
-     * Search directory for files with correct size (simplified version)
-     */
-    private fun tryDirectorySearch(
-        parentDir: File?, 
-        expectedSize: Long, 
-        targetPath: String, 
-        deferred: CompletableDeferred<String?>
-    ): Boolean {
-        if (parentDir?.exists() != true) {
-            logger.warn { "Parent directory does not exist: ${parentDir?.absolutePath}" }
-            return false
-        }
-        
-        try {
-            logger.info { "Searching directory for file with size: $expectedSize bytes" }
-            
-            val allFiles = try {
-                parentDir.listFiles()?.toList() ?: emptyList()
-            } catch (e: Exception) {
-                logger.warn { "Cannot list directory contents: ${e.message}" }
-                return false
-            }
-            
-            logger.info { "Directory contains ${allFiles.size} total files" }
-            
-            // Test each file
-            for (candidateFile in allFiles) {
-                try {
-                    if (!candidateFile.isFile) continue
-                    
-                    val actualSize = candidateFile.length()
-                    val safeFileName = getSafeFilename(candidateFile)
-                    
-                    logger.info { "Testing file: $safeFileName (size: $actualSize)" }
-                    
-                    if (actualSize == expectedSize && actualSize > 0) {
-                        logger.info { "Found size match, testing access..." }
-                        if (tryDirectFileAccess(candidateFile, expectedSize, targetPath, deferred)) {
-                            return true
-                        }
-                    }
-                    
-                } catch (e: Exception) {
-                    logger.debug { "Error testing candidate file: ${e.message}" }
-                }
-            }
-            
-        } catch (e: Exception) {
-            logger.warn(e) { "Error during directory search" }
-        }
-        
-        return false
-    }
-    
-    /**
-     * Get filename safely for logging (handles encoding errors gracefully)
-     */
-    private fun getSafeFilename(file: File): String {
-        return try {
-            // Try to get the filename normally
-            val name = file.name
-            
-            // Check if the name contains replacement characters (indicates encoding issues)
-            if (name.contains("�") || name.contains("?")) {
-                // Filename has encoding issues, show a safe representation
-                "<unicode-file-${file.length()}bytes>"
-            } else {
-                name
-            }
-        } catch (e: Exception) {
-            // If getting the name throws an exception, show a safe representation
-            "<encoding-error-${file.length()}bytes>"
-        }
-    }
-    
-    /**
-     * Enhanced directory logging with actual file access testing
-     */
-    private fun logDirectoryContentsDetailed(allFiles: List<File>, expectedSize: Long) {
-        try {
-            logger.debug { "Directory detailed analysis (${allFiles.size} files):" }
-            
-            allFiles.forEachIndexed { index, file ->
-                try {
-                    val actualSize = file.length()
-                    val age = (System.currentTimeMillis() - file.lastModified()) / 1000
-                    val sizeMatch = if (actualSize == expectedSize) "✅" else "❌"
-                    val safeFileName = getSafeFilename(file)
-                    
-                    // Test actual readability
-                    val readabilityTest = try {
-                        file.inputStream().use { stream ->
-                            val firstByte = stream.read()
-                            if (firstByte == -1) "EMPTY" else "READABLE"
-                        }
-                    } catch (e: Exception) {
-                        "PERMISSION_DENIED: ${e.javaClass.simpleName}"
-                    }
-                    
-                    logger.debug { 
-                        "  [$index] $safeFileName: ${actualSize} bytes (age: ${age}s) $sizeMatch - $readabilityTest"
-                    }
-                    
-                    // Additional permission details for files with correct size
-                    if (actualSize == expectedSize) {
-                        logger.debug {
-                            "    Permissions: readable=${file.canRead()}, writable=${file.canWrite()}, " +
-                            "exists=${file.exists()}, isFile=${file.isFile()}"
-                        }
-                    }
-                    
-                } catch (e: Exception) {
-                    logger.debug { "  [$index] <error examining file>: ${e.message}" }
-                }
-            }
-            
-        } catch (e: Exception) {
-            logger.error(e) { "Error in detailed directory logging" }
-        }
-    }
-    
-    /**
-     * Copy file to target with enhanced verification and Docker permission handling
+     * Enhanced copy verification using NIO instead of legacy File operations
      */
     private fun copyFileToTarget(
         sourceFile: File,
@@ -1261,59 +640,51 @@ class MediaDownloader {
         deferred: CompletableDeferred<String?>
     ) {
         try {
-            val targetFile = File(targetPath)
+            // Use NIO for more reliable file operations
+            val sourcePath = sourceFile.toPath()
+            val targetNioPath = java.nio.file.Paths.get(targetPath)
             
             // Ensure target directory exists
-            targetFile.parentFile?.mkdirs()
-            
-            // Enhanced copy with stream verification
-            logger.debug { "Copying ${sourceFile.absolutePath} to $targetPath" }
-            
-            // Use buffered streams for better performance and verification
-            sourceFile.inputStream().buffered().use { input ->
-                targetFile.outputStream().buffered().use { output ->
-                    val bytesCopied = input.copyTo(output)
-                    logger.debug { "Copied $bytesCopied bytes to target" }
-                }
+            targetNioPath.parent?.let { parent ->
+                java.nio.file.Files.createDirectories(parent)
             }
             
-            // Verify copy with actual file content check
-            if (!targetFile.exists()) {
-                logger.warn { "Target file does not exist after copy" }
-                deferred.complete(null)
-                return
-            }
+            logger.debug { "Copying ${sourcePath.fileName} to $targetPath" }
             
-            if (targetFile.length() != sourceFile.length()) {
-                logger.warn { "Size mismatch after copy: target=${targetFile.length()}, source=${sourceFile.length()}" }
-                deferred.complete(null)
-                return
-            }
+            // Use NIO copy for better reliability
+            java.nio.file.Files.copy(
+                sourcePath, 
+                targetNioPath, 
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING
+            )
             
-            if (targetFile.length() == 0L) {
-                logger.warn { "Target file is 0 bytes after copy" }
-                deferred.complete(null)
-                return
-            }
-            
-            // Final readability test on target file
-            try {
-                targetFile.inputStream().use { stream ->
-                    val testByte = stream.read()
-                    if (testByte == -1) {
-                        logger.warn { "Target file appears empty despite having size ${targetFile.length()}" }
-                        deferred.complete(null)
-                        return
+            // Verify using NIO
+            if (java.nio.file.Files.exists(targetNioPath)) {
+                val copiedSize = java.nio.file.Files.size(targetNioPath)
+                val originalSize = java.nio.file.Files.size(sourcePath)
+                
+                if (copiedSize == originalSize && copiedSize > 0) {
+                    // Test readability
+                    try {
+                        java.nio.file.Files.newInputStream(targetNioPath).use { stream ->
+                            val testByte = stream.read()
+                            if (testByte != -1) {
+                                logger.info { "Successfully copied and verified file: $targetPath ($copiedSize bytes)" }
+                                deferred.complete(targetPath)
+                                return
+                            }
+                        }
+                    } catch (e: Exception) {
+                        logger.warn { "Copied file not readable: ${e.message}" }
                     }
+                } else {
+                    logger.warn { "Size verification failed: original=$originalSize, copied=$copiedSize" }
                 }
-            } catch (e: Exception) {
-                logger.warn { "Cannot read target file after copy: ${e.message}" }
-                deferred.complete(null)
-                return
+            } else {
+                logger.warn { "Target file does not exist after copy" }
             }
             
-            logger.info { "Successfully copied and verified file: $targetPath (${targetFile.length()} bytes)" }
-            deferred.complete(targetPath)
+            deferred.complete(null)
             
         } catch (e: Exception) {
             logger.error(e) { "Error copying file to target: ${e.message}" }
