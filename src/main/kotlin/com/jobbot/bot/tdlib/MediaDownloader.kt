@@ -110,16 +110,26 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Use TDLib metadata first, then fallback to generating a name
+        // FIXED: Simple and correct logic
         val originalFileName = when {
-            !audio.fileName.isNullOrBlank() && !audio.fileName.startsWith("tmp") && audio.fileName.contains(".") -> 
-                audio.fileName // Use fileName if it looks meaningful
+            // If we have both artist and title, show as music (no extension) - matches Telegram
             !audio.title.isNullOrBlank() && !audio.performer.isNullOrBlank() -> 
-                "${audio.performer} - ${audio.title}.mp3"
-            !audio.title.isNullOrBlank() -> "${audio.title}.mp3"
-            !audio.performer.isNullOrBlank() -> "${audio.performer}.mp3"
-            !audio.fileName.isNullOrBlank() -> audio.fileName // Use even temp names as last resort
-            else -> "audio.mp3"
+                "${audio.performer} - ${audio.title}"
+            
+            // If we have just title, show it (no extension)
+            !audio.title.isNullOrBlank() -> 
+                audio.title
+            
+            // If we have just performer, show it (no extension)  
+            !audio.performer.isNullOrBlank() -> 
+                audio.performer
+            
+            // Otherwise, use original filename exactly as-is (no modifications)
+            !audio.fileName.isNullOrBlank() -> 
+                audio.fileName
+            
+            // Ultimate fallback (should rarely happen)
+            else -> "audio"
         }
         
         val filePath = downloadFile(client, audio.audio.id)
