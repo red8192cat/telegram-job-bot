@@ -12,7 +12,7 @@ import java.util.*
 
 /**
  * Downloads media attachments from TDLib messages
- * ENHANCED: Proper UTF-8 encoding support for Unicode filenames
+ * SIMPLIFIED: Direct file access - no copying, original filenames preserved
  */
 class MediaDownloader {
     private val logger = getLogger("MediaDownloader")
@@ -22,15 +22,6 @@ class MediaDownloader {
         private const val DOWNLOAD_TIMEOUT_MS = 45000L // 45 seconds per file
         private const val DOWNLOAD_POLL_INTERVAL_MS = 500L // Check every 500ms
         private const val MAX_POLL_ATTEMPTS = 90 // 45 seconds / 500ms
-        private const val TMP_DIR = "/tmp/jobbot_media"
-        
-        @JvmStatic
-        private var utf8Verified = false
-    }
-    
-    init {
-        // Ensure temp directory exists
-        File(TMP_DIR).mkdirs()
     }
     
     /**
@@ -119,13 +110,13 @@ class MediaDownloader {
             return null
         }
         
-        val originalFileName = audio.fileName.ifBlank { "audio_${UUID.randomUUID()}.mp3" }
-        val localPath = downloadFile(client, audio.audio.id, originalFileName)
+        val originalFileName = audio.fileName.ifBlank { "audio.mp3" }
+        val filePath = downloadFile(client, audio.audio.id)
         
-        return if (localPath != null) {
+        return if (filePath != null) {
             MediaAttachment(
                 type = MediaType.AUDIO,
-                filePath = localPath,
+                filePath = filePath,
                 originalFileName = originalFileName,
                 fileSize = audio.audio.size.toLong(),
                 mimeType = audio.mimeType,
@@ -149,12 +140,12 @@ class MediaDownloader {
             return null
         }
         
-        val localPath = downloadFile(client, photoSize.photo.id, "photo_${UUID.randomUUID()}.jpg")
+        val filePath = downloadFile(client, photoSize.photo.id)
         
-        return if (localPath != null) {
+        return if (filePath != null) {
             MediaAttachment(
                 type = MediaType.PHOTO,
-                filePath = localPath,
+                filePath = filePath,
                 originalFileName = "photo.jpg",
                 fileSize = photoSize.photo.size.toLong(),
                 mimeType = "image/jpeg",
@@ -177,17 +168,14 @@ class MediaDownloader {
             return null
         }
         
-        val extension = if (video.fileName.contains(".")) {
-            video.fileName.substringAfterLast(".")
-        } else "mp4"
+        val originalFileName = video.fileName.ifBlank { "video.mp4" }
+        val filePath = downloadFile(client, video.video.id)
         
-        val localPath = downloadFile(client, video.video.id, "video_${UUID.randomUUID()}.$extension")
-        
-        return if (localPath != null) {
+        return if (filePath != null) {
             MediaAttachment(
                 type = MediaType.VIDEO,
-                filePath = localPath,
-                originalFileName = video.fileName.ifBlank { "video.$extension" },
+                filePath = filePath,
+                originalFileName = originalFileName,
                 fileSize = video.video.size.toLong(),
                 mimeType = video.mimeType,
                 caption = caption,
@@ -210,13 +198,13 @@ class MediaDownloader {
             return null
         }
         
-        val originalFileName = document.fileName.ifBlank { "document_${UUID.randomUUID()}" }
-        val localPath = downloadFile(client, document.document.id, originalFileName)
+        val originalFileName = document.fileName.ifBlank { "document" }
+        val filePath = downloadFile(client, document.document.id)
         
-        return if (localPath != null) {
+        return if (filePath != null) {
             MediaAttachment(
                 type = MediaType.DOCUMENT,
-                filePath = localPath,
+                filePath = filePath,
                 originalFileName = originalFileName,
                 fileSize = document.document.size.toLong(),
                 mimeType = document.mimeType,
@@ -237,12 +225,12 @@ class MediaDownloader {
             return null
         }
         
-        val localPath = downloadFile(client, voice.voice.id, "voice_${UUID.randomUUID()}.ogg")
+        val filePath = downloadFile(client, voice.voice.id)
         
-        return if (localPath != null) {
+        return if (filePath != null) {
             MediaAttachment(
                 type = MediaType.VOICE,
-                filePath = localPath,
+                filePath = filePath,
                 originalFileName = "voice.ogg",
                 fileSize = voice.voice.size.toLong(),
                 mimeType = voice.mimeType,
@@ -264,13 +252,13 @@ class MediaDownloader {
             return null
         }
         
-        val originalFileName = animation.fileName.ifBlank { "animation_${UUID.randomUUID()}.gif" }
-        val localPath = downloadFile(client, animation.animation.id, originalFileName)
+        val originalFileName = animation.fileName.ifBlank { "animation.gif" }
+        val filePath = downloadFile(client, animation.animation.id)
         
-        return if (localPath != null) {
+        return if (filePath != null) {
             MediaAttachment(
                 type = MediaType.ANIMATION,
-                filePath = localPath,
+                filePath = filePath,
                 originalFileName = originalFileName,
                 fileSize = animation.animation.size.toLong(),
                 mimeType = animation.mimeType,
@@ -283,22 +271,19 @@ class MediaDownloader {
     }
     
     /**
-     * Download file with proper verification and retry logic
+     * Download file and return original TDLib path (no copying)
      */
     private suspend fun downloadFile(
         client: Client, 
-        fileId: Int, 
-        fileName: String
+        fileId: Int
     ): String? = withContext(Dispatchers.IO) {
         
         try {
-            val safeFileName = generateSafeFilename(fileName)
-            val targetPath = File(TMP_DIR, safeFileName).absolutePath
             val deferred = CompletableDeferred<String?>()
             
-            logger.debug { "Starting download: fileId=$fileId, targetPath=$targetPath" }
+            logger.debug { "Starting download: fileId=$fileId" }
             
-            // Force download with higher priority and offset 0
+            // Force download with higher priority
             client.send(TdApi.DownloadFile(fileId, 32, 0, 0, true)) { result ->
                 when (result) {
                     is TdApi.File -> {
@@ -306,7 +291,7 @@ class MediaDownloader {
                         logger.debug { "Download paths: remote=${result.remote.id}, local=${result.local.path}" }
                         
                         if (result.local.isDownloadingCompleted && result.local.downloadedSize == result.size) {
-                            handleCompletedDownload(result, targetPath, deferred)
+                            handleCompletedDownload(result, deferred)
                         } else {
                             logger.debug { "Download started for fileId=$fileId, polling... (progress: ${result.local.downloadedSize}/${result.size})" }
                         }
@@ -318,7 +303,7 @@ class MediaDownloader {
                 }
             }
             
-            // Aggressive polling with progress tracking
+            // Polling for download completion
             val pollJob = launch {
                 var pollCount = 0
                 var lastProgress = 0L
@@ -334,11 +319,11 @@ class MediaDownloader {
                                 val progress = fileResult.local.downloadedSize
                                 val total = fileResult.size
                                 
-                                logger.debug { "Poll $pollCount: Progress $progress/$total bytes (${(progress * 100 / total.coerceAtLeast(1))}%)" }
+                                logger.debug { "Poll $pollCount: Progress $progress/$total bytes (${if (total > 0) progress * 100 / total else 0}%)" }
                                 
                                 if (fileResult.local.isDownloadingCompleted && progress == total && total > 0) {
                                     logger.debug { "Download completed successfully: $progress bytes" }
-                                    handleCompletedDownload(fileResult, targetPath, deferred)
+                                    handleCompletedDownload(fileResult, deferred)
                                 } else if (progress == lastProgress) {
                                     stuckCount++
                                     if (stuckCount > 10) { // 5 seconds without progress
@@ -385,63 +370,48 @@ class MediaDownloader {
     }
     
     /**
-     * CLEAN SOLUTION: Handle completed download with proper UTF-8 configuration
+     * SIMPLIFIED: Verify original file exists and return its path
      */
     private fun handleCompletedDownload(
         file: TdApi.File,
-        targetPath: String,
         deferred: CompletableDeferred<String?>
     ) {
         try {
-            val tdlibSourcePath = file.local.path
+            val originalPath = file.local.path
             val expectedSize = file.size.toLong()
             val downloadedSize = file.local.downloadedSize.toLong()
             
-            if (tdlibSourcePath.isNullOrBlank()) {
-                logger.warn { "TDLib source path is empty" }
+            if (originalPath.isNullOrBlank()) {
+                logger.warn { "TDLib file path is empty" }
                 deferred.complete(null)
                 return
             }
             
-            // STRICT VERIFICATION: Must have downloaded the full file
-            if (downloadedSize != expectedSize) {
+            // Verify download completed fully
+            if (downloadedSize != expectedSize || expectedSize == 0L) {
                 logger.warn { "Download incomplete: downloaded $downloadedSize/$expectedSize bytes" }
                 deferred.complete(null)
                 return
             }
             
-            if (expectedSize == 0L) {
-                logger.warn { "File has 0 bytes - invalid download" }
+            // Verify file exists and is readable
+            val originalFile = File(originalPath)
+            if (!originalFile.exists() || !originalFile.isFile() || !originalFile.canRead()) {
+                logger.warn { "Original file not accessible: $originalPath" }
                 deferred.complete(null)
                 return
             }
             
-            logger.debug { "TDLib reports file at: '$tdlibSourcePath' (verified size: $expectedSize bytes)" }
-            
-            // Verify UTF-8 encoding is working (one-time check)
-            verifyUtf8Configuration()
-            
-            // Try direct file access first (should work with proper UTF-8)
-            val directFile = File(tdlibSourcePath)
-            if (tryDirectFileAccess(directFile, expectedSize, targetPath, deferred)) {
+            // Verify file size matches
+            val actualSize = originalFile.length()
+            if (actualSize != expectedSize) {
+                logger.warn { "File size mismatch: expected $expectedSize, actual $actualSize" }
+                deferred.complete(null)
                 return
             }
             
-            // Fallback: Use NIO approach
-            val parentDir = directFile.parentFile
-            if (parentDir?.exists() == true) {
-                val sourceFile = findFileWithNio(parentDir, expectedSize)
-                if (sourceFile != null) {
-                    logger.info { "✅ Found file via NIO fallback: ${sourceFile.fileName}" }
-                    copyFileWithNio(sourceFile, targetPath, deferred)
-                    return
-                }
-            } else {
-                logger.warn { "Parent directory does not exist: ${parentDir?.absolutePath}" }
-            }
-            
-            logger.warn { "Could not locate file with any approach" }
-            deferred.complete(null)
+            logger.debug { "Using original TDLib file: $originalPath ($actualSize bytes)" }
+            deferred.complete(originalPath)
             
         } catch (e: Exception) {
             logger.error(e) { "Error handling completed download" }
@@ -450,301 +420,19 @@ class MediaDownloader {
     }
     
     /**
-     * Verify UTF-8 encoding configuration (one-time check)
-     */
-    private fun verifyUtf8Configuration() {
-        // Only run this check once per instance
-        if (utf8Verified) return
-        
-        val fileEncoding = System.getProperty("file.encoding")
-        val sunJnuEncoding = System.getProperty("sun.jnu.encoding")
-        val defaultCharset = java.nio.charset.Charset.defaultCharset()
-        
-        logger.info { "UTF-8 Configuration Check:" }
-        logger.info { "  file.encoding: $fileEncoding" }
-        logger.info { "  sun.jnu.encoding: $sunJnuEncoding" }
-        logger.info { "  default charset: $defaultCharset" }
-        
-        if (fileEncoding == "UTF-8" && sunJnuEncoding == "UTF-8") {
-            logger.info { "✅ UTF-8 encoding properly configured!" }
-        } else {
-            logger.warn { "⚠️ UTF-8 encoding not fully configured - some Unicode filenames may fail" }
-            logger.warn { "  Consider setting JVM args: -Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8" }
-        }
-        
-        // Mark as checked
-        utf8Verified = true
-    }
-    
-    /**
-     * Try direct file access (should work with proper UTF-8 encoding)
-     */
-    private fun tryDirectFileAccess(
-        directFile: File, 
-        expectedSize: Long, 
-        targetPath: String, 
-        deferred: CompletableDeferred<String?>
-    ): Boolean {
-        try {
-            if (!directFile.exists()) {
-                logger.debug { "Direct file access failed: file does not exist" }
-                return false
-            }
-            
-            if (!directFile.isFile()) {
-                logger.debug { "Direct file access failed: not a regular file" }
-                return false
-            }
-            
-            val actualSize = directFile.length()
-            if (actualSize != expectedSize) {
-                logger.debug { "Direct file access failed: size mismatch (expected $expectedSize, got $actualSize)" }
-                return false
-            }
-            
-            if (actualSize == 0L) {
-                logger.debug { "Direct file access failed: file has 0 bytes" }
-                return false
-            }
-            
-            // Test actual read access
-            directFile.inputStream().use { stream ->
-                val buffer = ByteArray(1024)
-                val bytesRead = stream.read(buffer)
-                if (bytesRead > 0) {
-                    logger.info { "✅ Direct file access successful with UTF-8! ($actualSize bytes)" }
-                    copyFileToTarget(directFile, targetPath, deferred)
-                    return true
-                }
-            }
-            
-            return false
-            
-        } catch (e: Exception) {
-            logger.debug { "Direct file access failed: ${e.javaClass.simpleName} - ${e.message}" }
-            return false
-        }
-    }
-    
-    /**
-     * Find file using NIO which properly handles the filesystem encoding
-     */
-    private fun findFileWithNio(directory: File, expectedSize: Long): java.nio.file.Path? {
-        return try {
-            logger.info { "Searching for file with NIO (size: $expectedSize bytes)" }
-            
-            val dirPath = directory.toPath()
-            
-            // Use NIO directory stream which handles filesystem encoding correctly
-            java.nio.file.Files.newDirectoryStream(dirPath).use { stream ->
-                for (filePath in stream) {
-                    try {
-                        // Check if it's a regular file
-                        if (!java.nio.file.Files.isRegularFile(filePath)) continue
-                        
-                        // Check size using NIO (more reliable than File.length())
-                        val fileSize = java.nio.file.Files.size(filePath)
-                        
-                        if (fileSize == expectedSize) {
-                            logger.info { "Found matching file: size=$fileSize, path=${filePath.fileName}" }
-                            
-                            // Verify we can actually read this file
-                            if (java.nio.file.Files.isReadable(filePath)) {
-                                logger.info { "File is readable via NIO" }
-                                return filePath
-                            } else {
-                                logger.warn { "File found but not readable" }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        logger.debug { "Error checking file ${filePath.fileName}: ${e.message}" }
-                    }
-                }
-            }
-            
-            logger.warn { "No matching files found in directory" }
-            null
-            
-        } catch (e: Exception) {
-            logger.error(e) { "Error in findFileWithNio" }
-            null
-        }
-    }
-    
-    /**
-     * Copy file using NIO to bypass encoding issues
-     */
-    private fun copyFileWithNio(
-        sourcePath: java.nio.file.Path,
-        targetPath: String,
-        deferred: CompletableDeferred<String?>
-    ) {
-        try {
-            val targetNioPath = java.nio.file.Paths.get(targetPath)
-            
-            // Ensure target directory exists
-            targetNioPath.parent?.let { parent ->
-                java.nio.file.Files.createDirectories(parent)
-            }
-            
-            logger.debug { "Copying with NIO: ${sourcePath.fileName} -> $targetPath" }
-            
-            // Use NIO copy which handles encoding properly
-            java.nio.file.Files.copy(
-                sourcePath, 
-                targetNioPath, 
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING
-            )
-            
-            // Verify the copy using NIO
-            if (java.nio.file.Files.exists(targetNioPath)) {
-                val copiedSize = java.nio.file.Files.size(targetNioPath)
-                val originalSize = java.nio.file.Files.size(sourcePath)
-                
-                if (copiedSize == originalSize && copiedSize > 0) {
-                    // Final verification: try to read first few bytes
-                    try {
-                        java.nio.file.Files.newInputStream(targetNioPath).use { stream ->
-                            val testBytes = stream.readNBytes(1024)
-                            if (testBytes.isNotEmpty()) {
-                                logger.info { "✅ File successfully copied with NIO ($copiedSize bytes)" }
-                                deferred.complete(targetPath)
-                                return
-                            }
-                        }
-                    } catch (e: Exception) {
-                        logger.warn { "Copied file not readable: ${e.message}" }
-                    }
-                } else {
-                    logger.warn { "Copy verification failed: original=$originalSize, copied=$copiedSize" }
-                }
-            } else {
-                logger.warn { "Target file does not exist after NIO copy" }
-            }
-            
-            logger.warn { "NIO copy failed verification" }
-            deferred.complete(null)
-            
-        } catch (e: Exception) {
-            logger.error(e) { "Error copying file with NIO: ${e.message}" }
-            deferred.complete(null)
-        }
-    }
-    
-    /**
-     * Enhanced copy verification using NIO instead of legacy File operations
-     */
-    private fun copyFileToTarget(
-        sourceFile: File,
-        targetPath: String,
-        deferred: CompletableDeferred<String?>
-    ) {
-        try {
-            // Use NIO for more reliable file operations
-            val sourcePath = sourceFile.toPath()
-            val targetNioPath = java.nio.file.Paths.get(targetPath)
-            
-            // Ensure target directory exists
-            targetNioPath.parent?.let { parent ->
-                java.nio.file.Files.createDirectories(parent)
-            }
-            
-            logger.debug { "Copying ${sourcePath.fileName} to $targetPath" }
-            
-            // Use NIO copy for better reliability
-            java.nio.file.Files.copy(
-                sourcePath, 
-                targetNioPath, 
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING
-            )
-            
-            // Verify using NIO
-            if (java.nio.file.Files.exists(targetNioPath)) {
-                val copiedSize = java.nio.file.Files.size(targetNioPath)
-                val originalSize = java.nio.file.Files.size(sourcePath)
-                
-                if (copiedSize == originalSize && copiedSize > 0) {
-                    // Test readability
-                    try {
-                        java.nio.file.Files.newInputStream(targetNioPath).use { stream ->
-                            val testByte = stream.read()
-                            if (testByte != -1) {
-                                logger.info { "Successfully copied and verified file: $targetPath ($copiedSize bytes)" }
-                                deferred.complete(targetPath)
-                                return
-                            }
-                        }
-                    } catch (e: Exception) {
-                        logger.warn { "Copied file not readable: ${e.message}" }
-                    }
-                } else {
-                    logger.warn { "Size verification failed: original=$originalSize, copied=$copiedSize" }
-                }
-            } else {
-                logger.warn { "Target file does not exist after copy" }
-            }
-            
-            deferred.complete(null)
-            
-        } catch (e: Exception) {
-            logger.error(e) { "Error copying file to target: ${e.message}" }
-            deferred.complete(null)
-        }
-    }
-    
-    /**
-     * Generate a safe ASCII filename to avoid Unicode issues
-     */
-    private fun generateSafeFilename(originalName: String): String {
-        val extension = if (originalName.contains('.')) {
-            "." + originalName.substringAfterLast('.')
-        } else ""
-        
-        val timestamp = System.currentTimeMillis()
-        val random = (1000..9999).random()
-        
-        return "media_${timestamp}_${random}$extension"
-    }
-    
-    /**
-     * Clean up downloaded media files
+     * REMOVED: No longer needed since we use original files
+     * TDLib manages its own cache cleanup
      */
     fun cleanupMediaFiles(attachments: List<MediaAttachment>) {
-        attachments.forEach { attachment ->
-            try {
-                val file = File(attachment.filePath)
-                if (file.exists() && file.delete()) {
-                    logger.debug { "Cleaned up: ${attachment.filePath}" }
-                }
-            } catch (e: Exception) {
-                logger.warn(e) { "Error cleaning up: ${attachment.filePath}" }
-            }
-        }
+        // No cleanup needed - TDLib manages its own cache
+        logger.debug { "Cleanup skipped - using original TDLib files (${attachments.size} files)" }
     }
     
     /**
-     * Clean up old temp files
+     * REMOVED: No longer needed since we don't create temp files
      */
     fun cleanupOldTempFiles() {
-        try {
-            val tempDir = File(TMP_DIR)
-            if (!tempDir.exists()) return
-            
-            val oneHourAgo = System.currentTimeMillis() - (60 * 60 * 1000)
-            var cleanedCount = 0
-            
-            tempDir.listFiles()?.forEach { file ->
-                if (file.lastModified() < oneHourAgo && file.delete()) {
-                    cleanedCount++
-                }
-            }
-            
-            if (cleanedCount > 0) {
-                logger.debug { "Cleaned up $cleanedCount old temp files" }
-            }
-            
-        } catch (e: Exception) {
-            logger.warn(e) { "Error cleaning up old temp files" }
-        }
+        // No temp files created anymore
+        logger.debug { "Temp file cleanup skipped - no temp files created" }
     }
 }
