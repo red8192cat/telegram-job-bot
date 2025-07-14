@@ -1,6 +1,7 @@
 package com.jobbot.data.models
 
 import java.time.LocalDateTime
+import java.io.File
 
 // Message processing models
 // UPDATED: Added media attachment support for rich notifications
