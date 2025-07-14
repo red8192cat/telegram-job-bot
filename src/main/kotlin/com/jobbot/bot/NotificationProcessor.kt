@@ -30,20 +30,14 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.*
 
 /**
- * UPDATED NotificationProcessor with Simple Configurable Timeout + No Media Cleanup
- * 
- * Features:
- * - Single configurable timeout for all media uploads (default 5 minutes)
- * - No media file cleanup (TDLib manages its own files)
- * - Media reuse optimization for multiple users
- * - Preserved original Unicode filenames
- * - Improved error recovery and timeout handling
+ * FIXED NotificationProcessor with proper filename handling
+ * Now correctly uses actualFileName for all media uploads
  */
 class NotificationProcessor(
     private val database: Database,
     private val rateLimiter: RateLimiter,
     private val telegramClient: OkHttpTelegramClient,
-    private val config: BotConfig // NEW: For timeout configuration
+    private val config: BotConfig
 ) {
     private val logger = getLogger("NotificationProcessor")
     
@@ -337,7 +331,7 @@ class NotificationProcessor(
                 val media = when (attachment.type) {
                     MediaType.PHOTO -> {
                         val photoBuilder = InputMediaPhoto.builder()
-                            .media(file, attachment.actualFileName)
+                            .media(file, attachment.actualFileName) // FIXED: Use actualFileName
                         
                         if (caption != null) {
                             photoBuilder.caption(caption)
@@ -351,7 +345,7 @@ class NotificationProcessor(
                     
                     MediaType.VIDEO -> {
                         val videoBuilder = InputMediaVideo.builder()
-                            .media(file, attachment.actualFileName)
+                            .media(file, attachment.actualFileName) // FIXED: Use actualFileName
                         
                         if (caption != null) {
                             videoBuilder.caption(caption)
@@ -409,7 +403,7 @@ class NotificationProcessor(
                         val media = when (attachment.type) {
                             MediaType.PHOTO -> {
                                 val photoBuilder = InputMediaPhoto.builder()
-                                    .media(file, attachment.actualFileName)
+                                    .media(file, attachment.actualFileName) // FIXED: Use actualFileName
                                 
                                 if (caption != null) {
                                     photoBuilder.caption(caption)
@@ -419,7 +413,7 @@ class NotificationProcessor(
                             }
                             MediaType.VIDEO -> {
                                 val videoBuilder = InputMediaVideo.builder()
-                                    .media(file, attachment.actualFileName)
+                                    .media(file, attachment.actualFileName) // FIXED: Use actualFileName
                                 
                                 if (caption != null) {
                                     videoBuilder.caption(caption)
@@ -463,6 +457,7 @@ class NotificationProcessor(
     
     /**
      * Send individual media attachment with configurable timeout
+     * FIXED: Now uses actualFileName for all media types
      */
     private suspend fun sendMediaAttachment(
         chatId: String,
@@ -477,7 +472,8 @@ class NotificationProcessor(
                 return false
             }
             
-            val inputFile = InputFile(file)
+            // FIXED: Create InputFile with proper filename
+            val inputFile = InputFile(file, attachment.actualFileName)
             
             // Try MarkdownV2 first, then fallback to plain text
             val success = when (attachment.type) {
