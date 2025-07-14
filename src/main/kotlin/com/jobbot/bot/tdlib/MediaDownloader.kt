@@ -12,7 +12,7 @@ import java.util.*
 
 /**
  * Downloads media attachments from TDLib messages
- * FIXED: Preserves original metadata for proper Telegram Bot API usage
+ * FIXED: Uses filesystem names for uniqueness, preserves music metadata
  */
 class MediaDownloader {
     private val logger = getLogger("MediaDownloader")
@@ -170,11 +170,13 @@ class MediaDownloader {
         val filePath = downloadFile(client, photoSize.photo.id)
         
         return if (filePath != null) {
+            // FIXED: Just use the actual filename from filesystem
+            val actualFilename = File(filePath).name
+            
             MediaAttachment(
                 type = MediaType.PHOTO,
                 filePath = filePath,
-                // FIXED: Use unique filename with file ID
-                originalFileName = "photo_${photoSize.photo.id}.jpg",
+                originalFileName = actualFilename, // e.g., "5447242563103878913_121.jpg"
                 fileSize = photoSize.photo.size.toLong(),
                 mimeType = "image/jpeg",
                 caption = caption,
@@ -196,22 +198,20 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Generate unique filename
-        val originalFileName = when {
-            !video.fileName.isNullOrBlank() && !video.fileName.startsWith("tmp") && video.fileName.contains(".") -> 
-                video.fileName // Use TDLib filename if meaningful
-            !video.fileName.isNullOrBlank() -> 
-                video.fileName // Use even temp names as fallback
-            else -> 
-                "video_${video.video.id}.mp4" // FIXED: Use unique filename with file ID
-        }
-        
         val filePath = downloadFile(client, video.video.id)
         
-        logger.debug { "Video metadata - fileName: '${video.fileName}'" }
-        logger.debug { "Using filename: '$originalFileName'" }
-        
         return if (filePath != null) {
+            // FIXED: Use TDLib filename if available, otherwise filesystem name
+            val originalFileName = when {
+                !video.fileName.isNullOrBlank() && !video.fileName.startsWith("tmp") -> 
+                    video.fileName // Use TDLib filename if meaningful
+                else -> 
+                    File(filePath).name // Use actual filesystem name (e.g., "5447242562647651938.mp4")
+            }
+            
+            logger.debug { "Video metadata - fileName: '${video.fileName}'" }
+            logger.debug { "Using filename: '$originalFileName'" }
+            
             MediaAttachment(
                 type = MediaType.VIDEO,
                 filePath = filePath,
@@ -238,22 +238,20 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Generate unique filename for documents too
-        val originalFileName = when {
-            !document.fileName.isNullOrBlank() && !document.fileName.startsWith("tmp") && document.fileName.contains(".") -> 
-                document.fileName
-            !document.fileName.isNullOrBlank() -> 
-                document.fileName
-            else -> 
-                "document_${document.document.id}" // FIXED: Use unique filename (no extension since unknown type)
-        }
-        
         val filePath = downloadFile(client, document.document.id)
         
-        logger.debug { "Document metadata - fileName: '${document.fileName}'" }
-        logger.debug { "Using filename: '$originalFileName'" }
-        
         return if (filePath != null) {
+            // FIXED: Use TDLib filename if available, otherwise filesystem name
+            val originalFileName = when {
+                !document.fileName.isNullOrBlank() && !document.fileName.startsWith("tmp") -> 
+                    document.fileName // Use TDLib filename if meaningful
+                else -> 
+                    File(filePath).name // Use actual filesystem name
+            }
+            
+            logger.debug { "Document metadata - fileName: '${document.fileName}'" }
+            logger.debug { "Using filename: '$originalFileName'" }
+            
             MediaAttachment(
                 type = MediaType.DOCUMENT,
                 filePath = filePath,
@@ -304,22 +302,20 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Generate unique filename
-        val originalFileName = when {
-            !animation.fileName.isNullOrBlank() && !animation.fileName.startsWith("tmp") && animation.fileName.contains(".") -> 
-                animation.fileName
-            !animation.fileName.isNullOrBlank() -> 
-                animation.fileName
-            else -> 
-                "animation_${animation.animation.id}.gif" // FIXED: Use unique filename
-        }
-        
         val filePath = downloadFile(client, animation.animation.id)
         
-        logger.debug { "Animation metadata - fileName: '${animation.fileName}'" }
-        logger.debug { "Using filename: '$originalFileName'" }
-        
         return if (filePath != null) {
+            // FIXED: Use TDLib filename if available, otherwise filesystem name  
+            val originalFileName = when {
+                !animation.fileName.isNullOrBlank() && !animation.fileName.startsWith("tmp") -> 
+                    animation.fileName // Use TDLib filename if meaningful
+                else -> 
+                    File(filePath).name // Use actual filesystem name
+            }
+            
+            logger.debug { "Animation metadata - fileName: '${animation.fileName}'" }
+            logger.debug { "Using filename: '$originalFileName'" }
+            
             MediaAttachment(
                 type = MediaType.ANIMATION,
                 filePath = filePath,
