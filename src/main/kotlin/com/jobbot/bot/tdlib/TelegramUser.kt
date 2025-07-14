@@ -110,11 +110,10 @@ class TelegramUser(
                     request.deviceModel = "Server"
                     request.applicationVersion = "1.0"
                     
-                    // NEW: Storage configuration
+                    // NEW: Storage configuration (use available TDLib parameters)
                     request.filesDirectory = "${config.databasePath}_tdlib/files"
                     request.useFileDatabase = true
-                    request.enableStorageOptimizer = true
-                    request.ignoreFileNames = false  // Keep original filenames (Cyrillic support)
+                    // Note: Storage optimization will be handled manually via periodic cleanup
                     
                     logger.info { "TDLib storage configured: max ${config.tdlibMaxStorageGB}GB, TTL ${config.tdlibFileTtlDays} days" }
                     
@@ -287,17 +286,18 @@ class TelegramUser(
         }
     }
     
-    // NEW: Optimize TDLib storage (cleanup old files)
+    // NEW: Optimize TDLib storage (cleanup old files) - using correct API
     private suspend fun optimizeStorage() = withContext(Dispatchers.IO) {
         try {
             val optimizeDeferred = CompletableDeferred<TdApi.StorageStatistics?>()
             
+            // Use the correct TdApi.OptimizeStorage constructor
             client?.send(TdApi.OptimizeStorage(
-                size = config.tdlibMaxStorageGB * 1024L * 1024L * 1024L,  // Max storage in bytes
-                ttl = config.tdlibFileTtlDays * 24 * 3600,                // TTL in seconds
-                count = config.tdlibMaxFileCount,                         // Max file count
-                immunityDelay = 3600,                                     // Don't delete files used in last hour
-                fileTypes = arrayOf(                                      // What to clean up
+                config.tdlibMaxStorageGB * 1024L * 1024L * 1024L,  // size: Max storage in bytes
+                config.tdlibFileTtlDays * 24 * 3600,                // ttl: TTL in seconds  
+                config.tdlibMaxFileCount,                           // count: Max file count
+                3600,                                               // immunityDelay: Don't delete files used in last hour
+                arrayOf(                                            // fileTypes: What to clean up
                     TdApi.FileTypePhoto(),
                     TdApi.FileTypeVideo(),
                     TdApi.FileTypeDocument(),
@@ -305,10 +305,10 @@ class TelegramUser(
                     TdApi.FileTypeAnimation(),
                     TdApi.FileTypeVoiceNote()
                 ),
-                chatIds = longArrayOf(),                                  // Apply to all chats
-                excludeChatIds = longArrayOf(),                           // No exclusions
-                returnDeletedFileStatistics = true,
-                chatLimit = 100
+                longArrayOf(),                                      // chatIds: Apply to all chats
+                longArrayOf(),                                      // excludeChatIds: No exclusions  
+                true,                                               // returnDeletedFileStatistics
+                100                                                 // chatLimit
             )) { result ->
                 when (result) {
                     is TdApi.StorageStatistics -> {
