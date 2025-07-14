@@ -1,7 +1,7 @@
 package com.jobbot.bot
 
-import com.jobbot.bot.tdlib.MediaDownloader
 import com.jobbot.data.Database
+import com.jobbot.data.models.BotConfig
 import com.jobbot.data.models.MediaAttachment
 import com.jobbot.data.models.MediaType
 import com.jobbot.data.models.NotificationMessage
@@ -30,28 +30,30 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.*
 
 /**
- * ENHANCED NotificationProcessor with Media Reuse Optimization
+ * UPDATED NotificationProcessor with Simple Configurable Timeout + No Media Cleanup
  * 
  * Features:
- * - Reuses downloaded media for multiple users
- * - Improved download timeout handling
- * - Better error recovery
- * - Media cleanup optimization
+ * - Single configurable timeout for all media uploads (default 5 minutes)
+ * - No media file cleanup (TDLib manages its own files)
+ * - Media reuse optimization for multiple users
+ * - Preserved original Unicode filenames
+ * - Improved error recovery and timeout handling
  */
 class NotificationProcessor(
     private val database: Database,
     private val rateLimiter: RateLimiter,
-    private val telegramClient: OkHttpTelegramClient
+    private val telegramClient: OkHttpTelegramClient,
+    private val config: BotConfig // NEW: For timeout configuration
 ) {
     private val logger = getLogger("NotificationProcessor")
     
     private val notificationQueue = LinkedBlockingQueue<NotificationMessage>(1000)
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     
-    // Media downloader for cleanup operations
-    private val mediaDownloader = MediaDownloader()
+    // Convert configured timeout to milliseconds
+    private val uploadTimeoutMs = config.mediaUploadTimeoutSeconds * 1000L
     
-    // ADDED: Media reuse tracking - keyed by original message content hash
+    // Media reuse tracking - keyed by original message content hash
     private val mediaCache = ConcurrentHashMap<String, CachedMediaGroup>()
     
     // Enhanced tracking
@@ -72,6 +74,7 @@ class NotificationProcessor(
         startNotificationProcessor()
         startPeriodicStatsLogging()
         startMediaCacheCleanup()
+        logger.info { "NotificationProcessor initialized with ${config.mediaUploadTimeoutSeconds}s media upload timeout" }
     }
     
     fun queueNotification(notification: NotificationMessage) {
@@ -79,20 +82,13 @@ class NotificationProcessor(
             val queued = notificationQueue.offer(notification, 100, java.util.concurrent.TimeUnit.MILLISECONDS)
             if (!queued) {
                 logger.warn { "Notification queue full, dropping notification for user ${notification.userId}" }
-                // Clean up media files if notification was dropped
-                if (notification.mediaAttachments.isNotEmpty()) {
-                    scheduleMediaCleanup(notification.mediaAttachments)
-                }
+                // No cleanup needed - TDLib manages files
             } else {
                 logger.debug { "Notification queued for user ${notification.userId} with ${notification.mediaAttachments.size} attachments" }
             }
         } catch (e: Exception) {
             logger.error(e) { "Failed to queue notification" }
             ErrorTracker.logError("ERROR", "Failed to queue notification: ${e.message}", e)
-            // Clean up media files on error
-            if (notification.mediaAttachments.isNotEmpty()) {
-                scheduleMediaCleanup(notification.mediaAttachments)
-            }
         }
     }
     
@@ -165,7 +161,6 @@ class NotificationProcessor(
     
     private suspend fun processNotification(notification: NotificationMessage) {
         totalNotifications++
-        var shouldCleanupMedia = false
         
         try {
             // Check rate limiting
@@ -182,7 +177,6 @@ class NotificationProcessor(
             // Track media notifications
             if (notification.mediaAttachments.isNotEmpty()) {
                 mediaNotifications++
-                shouldCleanupMedia = true
                 logger.debug { "Processing notification with ${notification.mediaAttachments.size} media attachments" }
             }
             
@@ -202,20 +196,17 @@ class NotificationProcessor(
                 if (cachedGroup != null) {
                     cachedGroup.useCount--
                     if (cachedGroup.useCount <= 0) {
-                        // Last user - safe to clean up
+                        // Last user - remove from cache (no file cleanup needed)
                         mediaCache.remove(cacheKey)
-                        shouldCleanupMedia = true
-                        logger.debug { "Last user for media group, cleaning up" }
+                        logger.debug { "Last user for media group, removing from cache" }
                     } else {
-                        // Other users still need this media - don't clean up
-                        shouldCleanupMedia = false
+                        // Other users still need this media
                         mediaReusedCount++
                         logger.debug { "Media reused, ${cachedGroup.useCount} users remaining" }
                     }
                 }
             } else {
                 logger.warn { "Failed to deliver notification to user ${notification.userId}" }
-                shouldCleanupMedia = true
             }
 
         } catch (e: TelegramApiException) {
@@ -223,7 +214,6 @@ class NotificationProcessor(
             
             if (isUserUnreachableError(e)) {
                 logger.warn { "User ${notification.userId} is unreachable: ${e.message}" }
-                shouldCleanupMedia = true
             } else {
                 delay(10000)
                 notificationQueue.offer(notification)
@@ -232,29 +222,13 @@ class NotificationProcessor(
         } catch (e: Exception) {
             logger.error(e) { "Unexpected error for user ${notification.userId}" }
             ErrorTracker.logError("ERROR", "Notification processing error: ${e.message}", e)
-            shouldCleanupMedia = true
-            
-        } finally {
-            // Clean up media files if this was the last user or on error
-            if (shouldCleanupMedia && notification.mediaAttachments.isNotEmpty()) {
-                scheduleMediaCleanup(notification.mediaAttachments)
-            }
         }
+        
+        // NO MEDIA CLEANUP - TDLib manages its own files
     }
-    
-    /**
-     * Schedule media cleanup to run after a short delay (allows for reuse)
-     */
-    private fun scheduleMediaCleanup(attachments: List<MediaAttachment>) {
-        scope.launch {
-            delay(5000) // Wait 5 seconds before cleanup
-            mediaDownloader.cleanupMediaFiles(attachments)
-        }
-    }
-    
+
     /**
      * Send notification with media attachments using proper Telegram media group
-     * FIXED: Uses correct API v9.x syntax for InputMedia creation
      */
     private suspend fun sendNotificationWithMedia(
         notification: NotificationMessage,
@@ -285,7 +259,6 @@ class NotificationProcessor(
 
     /**
      * Send proper Telegram media group (album) - appears as ONE message with multiple media
-     * FIXED: Correct API v9.x implementation
      */
     private suspend fun sendProperMediaGroup(
         chatId: String,
@@ -337,7 +310,6 @@ class NotificationProcessor(
 
     /**
      * Send Telegram media group using correct API v9.x
-     * FIXED: Uses direct file reference approach that works with all v9.x versions
      */
     private suspend fun sendTelegramMediaGroup(
         chatId: String,
@@ -364,9 +336,8 @@ class NotificationProcessor(
                 
                 val media = when (attachment.type) {
                     MediaType.PHOTO -> {
-                        // Use direct file constructor for InputMediaPhoto
                         val photoBuilder = InputMediaPhoto.builder()
-                            .media(file, "photo_$i.jpg")
+                            .media(file, attachment.actualFileName)
                         
                         if (caption != null) {
                             photoBuilder.caption(caption)
@@ -379,9 +350,8 @@ class NotificationProcessor(
                     }
                     
                     MediaType.VIDEO -> {
-                        // Use direct file constructor for InputMediaVideo
                         val videoBuilder = InputMediaVideo.builder()
-                            .media(file, "video_$i.mp4")
+                            .media(file, attachment.actualFileName)
                         
                         if (caption != null) {
                             videoBuilder.caption(caption)
@@ -407,12 +377,12 @@ class NotificationProcessor(
                 return false
             }
             
-            // Create the sendMediaGroup request using direct constructor
+            // Create the sendMediaGroup request
             val sendMediaGroup = SendMediaGroup(chatId, mediaList)
             
             // Try to send with MarkdownV2 first
             val success = try {
-                withTimeout(25000) { // 25 second timeout for media groups
+                withTimeout(uploadTimeoutMs) {
                     withContext(Dispatchers.IO) {
                         telegramClient.execute(sendMediaGroup)
                     }
@@ -439,7 +409,7 @@ class NotificationProcessor(
                         val media = when (attachment.type) {
                             MediaType.PHOTO -> {
                                 val photoBuilder = InputMediaPhoto.builder()
-                                    .media(file, "photo_plain_$i.jpg")
+                                    .media(file, attachment.actualFileName)
                                 
                                 if (caption != null) {
                                     photoBuilder.caption(caption)
@@ -449,7 +419,7 @@ class NotificationProcessor(
                             }
                             MediaType.VIDEO -> {
                                 val videoBuilder = InputMediaVideo.builder()
-                                    .media(file, "video_plain_$i.mp4")
+                                    .media(file, attachment.actualFileName)
                                 
                                 if (caption != null) {
                                     videoBuilder.caption(caption)
@@ -468,7 +438,7 @@ class NotificationProcessor(
                     
                     val plainSendMediaGroup = SendMediaGroup(chatId, plainMediaList)
                     
-                    withTimeout(25000) {
+                    withTimeout(uploadTimeoutMs) {
                         withContext(Dispatchers.IO) {
                             telegramClient.execute(plainSendMediaGroup)
                         }
@@ -490,48 +460,9 @@ class NotificationProcessor(
             return false
         }
     }
-
-    /**
-     * Fallback: send media attachments individually when media group fails
-     */
-    private suspend fun sendMediaGroupFallback(
-        chatId: String,
-        attachments: List<MediaAttachment>,
-        markdownContent: String?,
-        plainContent: String?
-    ): Boolean {
-        logger.debug { "Using fallback: sending ${attachments.size} attachments individually" }
-        
-        var successCount = 0
-        
-        for (i in attachments.indices) {
-            val attachment = attachments[i]
-            try {
-                // Only add caption to the first attachment
-                val caption = if (i == 0) markdownContent else null
-                val plainCaption = if (i == 0) plainContent else null
-                
-                val sent = sendMediaAttachment(chatId, attachment, caption, plainCaption)
-                if (sent) {
-                    successCount++
-                }
-                
-                // Small delay between individual messages
-                if (i < attachments.size - 1) {
-                    delay(300)
-                }
-                
-            } catch (e: Exception) {
-                logger.warn(e) { "Failed to send fallback attachment ${i + 1}/${attachments.size}" }
-            }
-        }
-        
-        logger.info { "Fallback completed: $successCount/${attachments.size} attachments sent" }
-        return successCount > 0
-    }
     
     /**
-     * Send individual media attachment
+     * Send individual media attachment with configurable timeout
      */
     private suspend fun sendMediaAttachment(
         chatId: String,
@@ -582,7 +513,7 @@ class NotificationProcessor(
             }
             
             if (success) {
-                logger.debug { "✅ Sent ${attachment.type} attachment: ${attachment.originalFileName}" }
+                logger.debug { "✅ Sent ${attachment.type} attachment: ${attachment.actualFileName}" }
             }
             
             success
@@ -605,7 +536,7 @@ class NotificationProcessor(
                 .parseMode("MarkdownV2")
                 .build()
             
-            withTimeout(10000) { // Increased timeout for media
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendPhoto)
                 }
@@ -624,7 +555,7 @@ class NotificationProcessor(
                 .apply { if (!content.isNullOrBlank()) caption(content) }
                 .build()
             
-            withTimeout(10000) {
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendPhoto)
                 }
@@ -653,7 +584,7 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withTimeout(15000) {
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendVideo)
                 }
@@ -677,7 +608,7 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withTimeout(15000) {
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendVideo)
                 }
@@ -706,7 +637,7 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withTimeout(15000) {
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendAnimation)
                 }
@@ -730,7 +661,7 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withTimeout(15000) {
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendAnimation)
                 }
@@ -754,7 +685,7 @@ class NotificationProcessor(
                 .parseMode("MarkdownV2")
                 .build()
             
-            withTimeout(20000) {
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendDocument)
                 }
@@ -773,7 +704,7 @@ class NotificationProcessor(
                 .apply { if (!content.isNullOrBlank()) caption(content) }
                 .build()
             
-            withTimeout(20000) {
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendDocument)
                 }
@@ -798,7 +729,7 @@ class NotificationProcessor(
                 .apply { attachment.duration?.let { duration(it) } }
                 .build()
             
-            withTimeout(20000) {
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendAudio)
                 }
@@ -820,7 +751,7 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withTimeout(20000) {
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendAudio)
                 }
@@ -845,7 +776,7 @@ class NotificationProcessor(
                 .apply { attachment.duration?.let { duration(it) } }
                 .build()
             
-            withTimeout(15000) {
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendVoice)
                 }
@@ -867,7 +798,7 @@ class NotificationProcessor(
                 }
                 .build()
             
-            withTimeout(15000) {
+            withTimeout(uploadTimeoutMs) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(sendVoice)
                 }
@@ -900,8 +831,6 @@ class NotificationProcessor(
     private fun buildSimpleMessage(notification: NotificationMessage, language: String): Pair<String, String> {
         val channelName = notification.channelName
         val originalContent = notification.formattedMessageText ?: notification.messageText
-        
-        // Build MarkdownV2 version
         val markdownParts = mutableListOf<String>()
         
         // Build header with clickable channel link
@@ -1062,7 +991,7 @@ class NotificationProcessor(
     }
     
     /**
-     * Start media cache cleanup - removes old cached media groups
+     * Start media cache cleanup - removes old cached media groups (cache references only, not files)
      */
     private fun startMediaCacheCleanup() {
         scope.launch {
@@ -1079,8 +1008,6 @@ class NotificationProcessor(
                         val removedGroup = mediaCache.remove(key)
                         if (removedGroup != null) {
                             logger.debug { "Expired media cache entry: ${key.take(8)}..." }
-                            // Clean up any remaining files
-                            scheduleMediaCleanup(removedGroup.attachments)
                         }
                     }
                     
@@ -1128,7 +1055,8 @@ class NotificationProcessor(
             "mediaReused" to mediaReusedCount,
             "mediaCacheSize" to mediaCache.size,
             "successRate" to if (totalNotifications > 0) (markdownSuccess * 100 / totalNotifications) else 0,
-            "mediaRate" to if (totalNotifications > 0) (mediaNotifications * 100 / totalNotifications) else 0
+            "mediaRate" to if (totalNotifications > 0) (mediaNotifications * 100 / totalNotifications) else 0,
+            "uploadTimeoutSeconds" to config.mediaUploadTimeoutSeconds
         )
     }
     
@@ -1146,24 +1074,14 @@ class NotificationProcessor(
             }
         }
         
-        // Clean up any remaining queued notifications with media
+        // Clear cache references (no file cleanup needed - TDLib manages files)
+        mediaCache.clear()
+        
         val remainingNotifications = mutableListOf<NotificationMessage>()
         notificationQueue.drainTo(remainingNotifications)
         
-        remainingNotifications.forEach { notification ->
-            if (notification.mediaAttachments.isNotEmpty()) {
-                mediaDownloader.cleanupMediaFiles(notification.mediaAttachments)
-            }
-        }
-        
-        // Clean up cached media
-        mediaCache.values.forEach { group ->
-            mediaDownloader.cleanupMediaFiles(group.attachments)
-        }
-        mediaCache.clear()
-        
         if (remainingNotifications.isNotEmpty()) {
-            logger.info { "Cleaned up ${remainingNotifications.size} queued notifications and ${mediaCache.size} cached media groups during shutdown" }
+            logger.info { "Cleared ${remainingNotifications.size} queued notifications during shutdown" }
         }
         
         scope.cancel()

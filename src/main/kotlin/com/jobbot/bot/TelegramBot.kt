@@ -44,8 +44,8 @@ class TelegramBot(
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val telegramClient = OkHttpTelegramClient(config.botToken)
     
-    // Notification processor
-    private val notificationProcessor = NotificationProcessor(database, rateLimiter, telegramClient)
+    // Notification processor - NOW PASSES CONFIG FOR TIMEOUT
+    private val notificationProcessor = NotificationProcessor(database, rateLimiter, telegramClient, config)
     
     init {
         adminCommandRouter.setBotInstance(this)

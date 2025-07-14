@@ -110,6 +110,14 @@ class TelegramUser(
                     request.deviceModel = "Server"
                     request.applicationVersion = "1.0"
                     
+                    // NEW: Storage configuration
+                    request.filesDirectory = "${config.databasePath}_tdlib/files"
+                    request.useFileDatabase = true
+                    request.enableStorageOptimizer = true
+                    request.ignoreFileNames = false  // Keep original filenames (Cyrillic support)
+                    
+                    logger.info { "TDLib storage configured: max ${config.tdlibMaxStorageGB}GB, TTL ${config.tdlibFileTtlDays} days" }
+                    
                     client?.send(request, null)
                 }
                 
@@ -170,6 +178,10 @@ class TelegramUser(
                     
                     // Join existing channels
                     joinExistingChannels()
+                    
+                    // NEW: Start storage management
+                    startStorageManagement()
+                    
                     bot?.sendAdminNotification(Localization.getAdminMessage("tdlib.connected"))
                 }
                 
@@ -191,7 +203,148 @@ class TelegramUser(
                 }
             }
         }
-    }    
+    }
+    
+    // NEW: Start TDLib storage management
+    private fun startStorageManagement() {
+        scope.launch {
+            logger.info { "Starting TDLib storage management (cleanup every ${config.tdlibCleanupIntervalHours}h)" }
+            
+            // Initial storage check
+            checkStorageStats()
+            
+            while (isActive && isConnected) {
+                try {
+                    // Wait for cleanup interval
+                    delay(config.tdlibCleanupIntervalHours * 3600000L)
+                    
+                    if (!isConnected) break
+                    
+                    logger.info { "Running TDLib storage optimization..." }
+                    
+                    // Get storage stats before cleanup
+                    checkStorageStats()
+                    
+                    // Run storage optimization
+                    optimizeStorage()
+                    
+                } catch (e: CancellationException) {
+                    logger.info { "Storage management stopped" }
+                    break
+                } catch (e: Exception) {
+                    logger.warn(e) { "Error in storage management cycle" }
+                    // Continue running even if one cycle fails
+                    delay(3600000L) // Wait 1 hour before retry
+                }
+            }
+            
+            logger.info { "TDLib storage management stopped" }
+        }
+    }
+    
+    // NEW: Check TDLib storage statistics
+    private suspend fun checkStorageStats() = withContext(Dispatchers.IO) {
+        try {
+            val statsDeferred = CompletableDeferred<TdApi.StorageStatistics?>()
+            
+            client?.send(TdApi.GetStorageStatistics(100)) { result ->
+                when (result) {
+                    is TdApi.StorageStatistics -> {
+                        statsDeferred.complete(result)
+                    }
+                    is TdApi.Error -> {
+                        logger.warn { "Failed to get storage stats: ${result.message}" }
+                        statsDeferred.complete(null)
+                    }
+                }
+            }
+            
+            val stats = withTimeout(10000) { statsDeferred.await() }
+            
+            if (stats != null) {
+                val sizeMB = stats.size / 1024 / 1024
+                val sizeGB = sizeMB / 1024.0
+                val maxGB = config.tdlibMaxStorageGB
+                
+                logger.info { "TDLib storage: ${sizeMB}MB (${String.format("%.1f", sizeGB)}GB / ${maxGB}GB)" }
+                
+                if (sizeGB > maxGB * 0.8) { // 80% of limit
+                    logger.warn { "TDLib storage is ${String.format("%.1f", (sizeGB / maxGB * 100))}% full!" }
+                }
+                
+                // Notify admin if storage is getting full
+                if (sizeGB > maxGB * 0.9) { // 90% of limit
+                    bot?.sendAdminNotification(
+                        "⚠️ **TDLib Storage Alert**\n\n" +
+                        "Storage usage: ${String.format("%.1f", sizeGB)}GB / ${maxGB}GB (${String.format("%.1f", (sizeGB / maxGB * 100))}%)\n\n" +
+                        "Consider increasing TDLIB_MAX_STORAGE_GB or reducing TDLIB_FILE_TTL_DAYS."
+                    )
+                }
+            }
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Error checking storage stats" }
+        }
+    }
+    
+    // NEW: Optimize TDLib storage (cleanup old files)
+    private suspend fun optimizeStorage() = withContext(Dispatchers.IO) {
+        try {
+            val optimizeDeferred = CompletableDeferred<TdApi.StorageStatistics?>()
+            
+            client?.send(TdApi.OptimizeStorage(
+                size = config.tdlibMaxStorageGB * 1024L * 1024L * 1024L,  // Max storage in bytes
+                ttl = config.tdlibFileTtlDays * 24 * 3600,                // TTL in seconds
+                count = config.tdlibMaxFileCount,                         // Max file count
+                immunityDelay = 3600,                                     // Don't delete files used in last hour
+                fileTypes = arrayOf(                                      // What to clean up
+                    TdApi.FileTypePhoto(),
+                    TdApi.FileTypeVideo(),
+                    TdApi.FileTypeDocument(),
+                    TdApi.FileTypeAudio(),
+                    TdApi.FileTypeAnimation(),
+                    TdApi.FileTypeVoiceNote()
+                ),
+                chatIds = longArrayOf(),                                  // Apply to all chats
+                excludeChatIds = longArrayOf(),                           // No exclusions
+                returnDeletedFileStatistics = true,
+                chatLimit = 100
+            )) { result ->
+                when (result) {
+                    is TdApi.StorageStatistics -> {
+                        optimizeDeferred.complete(result)
+                    }
+                    is TdApi.Error -> {
+                        logger.warn { "Storage optimization failed: ${result.message}" }
+                        optimizeDeferred.complete(null)
+                    }
+                }
+            }
+            
+            val deletedStats = withTimeout(60000) { optimizeDeferred.await() } // 60s timeout for cleanup
+            
+            if (deletedStats != null) {
+                val deletedMB = deletedStats.size / 1024 / 1024
+                logger.info { "TDLib storage optimization completed: freed ${deletedMB}MB" }
+                
+                // Notify admin of significant cleanup
+                if (deletedMB > 100) { // More than 100MB cleaned
+                    bot?.sendAdminNotification(
+                        "🧹 **TDLib Storage Cleanup**\n\n" +
+                        "Freed ${deletedMB}MB of storage space.\n" +
+                        "Old files removed according to configured TTL (${config.tdlibFileTtlDays} days)."
+                    )
+                }
+                
+                // Check storage stats after cleanup
+                delay(1000)
+                checkStorageStats()
+            }
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Error during storage optimization" }
+        }
+    }
     
     private suspend fun joinExistingChannels() {
         val channels = database.getAllChannels()
