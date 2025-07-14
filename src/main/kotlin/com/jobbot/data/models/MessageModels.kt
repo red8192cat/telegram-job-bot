@@ -29,11 +29,11 @@ data class NotificationMessage(
     val mediaAttachments: List<MediaAttachment> = emptyList() // NEW: Media attachments
 )
 
-// NEW: Media attachment data model - Updated for direct file access
+// FIXED: Media attachment data model with proper filename handling
 data class MediaAttachment(
     val type: MediaType,
-    val filePath: String, // Original TDLib file path (preserves original filename)
-    val originalFileName: String? = null, // Display name extracted from TDLib
+    val filePath: String, // Original TDLib file path
+    val originalFileName: String? = null, // Display name extracted from TDLib metadata
     val fileSize: Long = 0,
     val mimeType: String? = null,
     val caption: String? = null, // For photos/videos with captions
@@ -42,14 +42,20 @@ data class MediaAttachment(
     val duration: Int? = null // For videos/audio
 ) {
     /**
-     * Get the actual filename from the file path
-     * Preserves original Unicode characters (Cyrillic, etc.)
+     * Get the filename for display/upload to Telegram
+     * Prioritizes original metadata filename over file path
      */
     val actualFileName: String
-        get() = try {
-            File(filePath).name
-        } catch (e: Exception) {
-            originalFileName ?: "unknown"
+        get() = when {
+            !originalFileName.isNullOrBlank() -> originalFileName
+            else -> {
+                // Fallback to file path name (should rarely be used now)
+                try {
+                    File(filePath).name
+                } catch (e: Exception) {
+                    "unknown"
+                }
+            }
         }
 }
 

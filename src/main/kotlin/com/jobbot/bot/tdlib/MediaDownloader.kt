@@ -12,7 +12,7 @@ import java.util.*
 
 /**
  * Downloads media attachments from TDLib messages
- * SIMPLIFIED: Direct file access - no copying, original filenames preserved
+ * FIXED: Proper filename handling using metadata over file paths
  */
 class MediaDownloader {
     private val logger = getLogger("MediaDownloader")
@@ -105,22 +105,27 @@ class MediaDownloader {
     ): MediaAttachment? {
         val audio = content.audio
         
-        // DEBUG: Let's see what TDLib actually gives us
-        logger.debug { "TDLib audio fileName: '${audio.fileName}'" }
-        logger.debug { "TDLib audio mimeType: '${audio.mimeType}'" }
-        
         if (audio.audio.size > MAX_FILE_SIZE) {
             logger.debug { "Audio too large: ${audio.audio.size / 1024 / 1024}MB (limit: ${MAX_FILE_SIZE / 1024 / 1024}MB)" }
             return null
         }
         
-        val originalFileName = audio.fileName.ifBlank { "audio.mp3" }
+        // FIXED: Use TDLib metadata first, then fallback to generating a name
+        val originalFileName = when {
+            !audio.fileName.isNullOrBlank() && !audio.fileName.startsWith("tmp") && audio.fileName.contains(".") -> 
+                audio.fileName // Use fileName if it looks meaningful
+            !audio.title.isNullOrBlank() && !audio.performer.isNullOrBlank() -> 
+                "${audio.performer} - ${audio.title}.mp3"
+            !audio.title.isNullOrBlank() -> "${audio.title}.mp3"
+            !audio.performer.isNullOrBlank() -> "${audio.performer}.mp3"
+            !audio.fileName.isNullOrBlank() -> audio.fileName // Use even temp names as last resort
+            else -> "audio.mp3"
+        }
+        
         val filePath = downloadFile(client, audio.audio.id)
         
-        if (filePath != null) {
-            logger.debug { "File path from TDLib: '$filePath'" }
-            logger.debug { "Original fileName we're using: '$originalFileName'" }
-        }
+        logger.debug { "Audio metadata - fileName: '${audio.fileName}', title: '${audio.title}', performer: '${audio.performer}'" }
+        logger.debug { "Using filename: '$originalFileName'" }
         
         return if (filePath != null) {
             MediaAttachment(
@@ -177,8 +182,18 @@ class MediaDownloader {
             return null
         }
         
-        val originalFileName = video.fileName.ifBlank { "video.mp4" }
+        // FIXED: Use TDLib metadata first, then fallback
+        val originalFileName = when {
+            !video.fileName.isNullOrBlank() && !video.fileName.startsWith("tmp") && video.fileName.contains(".") -> 
+                video.fileName // Use fileName if it looks meaningful
+            !video.fileName.isNullOrBlank() -> video.fileName // Use even temp names as fallback
+            else -> "video.mp4"
+        }
+        
         val filePath = downloadFile(client, video.video.id)
+        
+        logger.debug { "Video metadata - fileName: '${video.fileName}'" }
+        logger.debug { "Using filename: '$originalFileName'" }
         
         return if (filePath != null) {
             MediaAttachment(
@@ -207,8 +222,18 @@ class MediaDownloader {
             return null
         }
         
-        val originalFileName = document.fileName.ifBlank { "document" }
+        // FIXED: Use TDLib metadata first, then fallback
+        val originalFileName = when {
+            !document.fileName.isNullOrBlank() && !document.fileName.startsWith("tmp") && document.fileName.contains(".") -> 
+                document.fileName // Use fileName if it looks meaningful
+            !document.fileName.isNullOrBlank() -> document.fileName // Use even temp names as fallback
+            else -> "document"
+        }
+        
         val filePath = downloadFile(client, document.document.id)
+        
+        logger.debug { "Document metadata - fileName: '${document.fileName}'" }
+        logger.debug { "Using filename: '$originalFileName'" }
         
         return if (filePath != null) {
             MediaAttachment(
@@ -261,8 +286,18 @@ class MediaDownloader {
             return null
         }
         
-        val originalFileName = animation.fileName.ifBlank { "animation.gif" }
+        // FIXED: Use TDLib metadata first, then fallback
+        val originalFileName = when {
+            !animation.fileName.isNullOrBlank() && !animation.fileName.startsWith("tmp") && animation.fileName.contains(".") -> 
+                animation.fileName // Use fileName if it looks meaningful
+            !animation.fileName.isNullOrBlank() -> animation.fileName // Use even temp names as fallback
+            else -> "animation.gif"
+        }
+        
         val filePath = downloadFile(client, animation.animation.id)
+        
+        logger.debug { "Animation metadata - fileName: '${animation.fileName}'" }
+        logger.debug { "Using filename: '$originalFileName'" }
         
         return if (filePath != null) {
             MediaAttachment(
@@ -379,7 +414,7 @@ class MediaDownloader {
     }
     
     /**
-     * SIMPLIFIED: Verify original file exists and return its path
+     * Verify original file exists and return its path
      */
     private fun handleCompletedDownload(
         file: TdApi.File,
@@ -429,8 +464,7 @@ class MediaDownloader {
     }
     
     /**
-     * REMOVED: No longer needed since we use original files
-     * TDLib manages its own cache cleanup
+     * No cleanup needed since we use original files
      */
     fun cleanupMediaFiles(attachments: List<MediaAttachment>) {
         // No cleanup needed - TDLib manages its own cache
@@ -438,7 +472,7 @@ class MediaDownloader {
     }
     
     /**
-     * REMOVED: No longer needed since we don't create temp files
+     * No temp files created anymore
      */
     fun cleanupOldTempFiles() {
         // No temp files created anymore
