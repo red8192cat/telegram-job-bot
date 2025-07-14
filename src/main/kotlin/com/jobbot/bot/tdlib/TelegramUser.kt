@@ -110,8 +110,7 @@ class TelegramUser(
                     request.deviceModel = "Server"
                     request.applicationVersion = "1.0"
                     
-                    // NEW: Storage configuration (use available TDLib parameters)
-                    request.filesDirectory = "${config.databasePath}_tdlib/files"
+                    // NEW: Storage configuration (let TDLib use default file handling)
                     request.useFileDatabase = true
                     // Note: Storage optimization will be handled manually via periodic cleanup
                     
