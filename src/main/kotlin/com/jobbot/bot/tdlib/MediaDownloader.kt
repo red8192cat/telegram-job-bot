@@ -12,7 +12,7 @@ import java.util.*
 
 /**
  * Downloads media attachments from TDLib messages
- * FIXED: Proper filename handling using metadata over file paths
+ * FIXED: Preserves original metadata for proper Telegram Bot API usage
  */
 class MediaDownloader {
     private val logger = getLogger("MediaDownloader")
@@ -110,7 +110,7 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Simple and correct logic
+        // FIXED: Simple and correct logic for display filename
         val originalFileName = when {
             // If we have both artist and title, show as music (no extension) - matches Telegram
             !audio.title.isNullOrBlank() && !audio.performer.isNullOrBlank() -> 
@@ -145,7 +145,10 @@ class MediaDownloader {
                 fileSize = audio.audio.size.toLong(),
                 mimeType = audio.mimeType,
                 caption = caption,
-                duration = audio.duration
+                duration = audio.duration,
+                // FIXED: Pass the original metadata from TDLib
+                performer = audio.performer?.takeIf { it.isNotBlank() },  // Only if not empty
+                title = audio.title?.takeIf { it.isNotBlank() }           // Only if not empty
             )
         } else null
     }
@@ -192,7 +195,7 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Use TDLib metadata first, then fallback
+        // Use TDLib metadata first, then fallback
         val originalFileName = when {
             !video.fileName.isNullOrBlank() && !video.fileName.startsWith("tmp") && video.fileName.contains(".") -> 
                 video.fileName // Use fileName if it looks meaningful
@@ -232,7 +235,7 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Use TDLib metadata first, then fallback
+        // Use TDLib metadata first, then fallback
         val originalFileName = when {
             !document.fileName.isNullOrBlank() && !document.fileName.startsWith("tmp") && document.fileName.contains(".") -> 
                 document.fileName // Use fileName if it looks meaningful
@@ -296,7 +299,7 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Use TDLib metadata first, then fallback
+        // Use TDLib metadata first, then fallback
         val originalFileName = when {
             !animation.fileName.isNullOrBlank() && !animation.fileName.startsWith("tmp") && animation.fileName.contains(".") -> 
                 animation.fileName // Use fileName if it looks meaningful

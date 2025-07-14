@@ -29,17 +29,20 @@ data class NotificationMessage(
     val mediaAttachments: List<MediaAttachment> = emptyList() // NEW: Media attachments
 )
 
-// FIXED: Media attachment data model with proper filename handling
+// FIXED: Media attachment data model with original metadata preserved
 data class MediaAttachment(
     val type: MediaType,
     val filePath: String, // Original TDLib file path
-    val originalFileName: String? = null, // Display name extracted from TDLib metadata
+    val originalFileName: String? = null, // Display name for filename
     val fileSize: Long = 0,
     val mimeType: String? = null,
     val caption: String? = null, // For photos/videos with captions
     val width: Int? = null,
     val height: Int? = null,
-    val duration: Int? = null // For videos/audio
+    val duration: Int? = null, // For videos/audio
+    // NEW: Original metadata from TDLib (for audio files)
+    val performer: String? = null,  // Artist/performer from TDLib
+    val title: String? = null       // Song title from TDLib
 ) {
     /**
      * Get the filename for display/upload to Telegram
