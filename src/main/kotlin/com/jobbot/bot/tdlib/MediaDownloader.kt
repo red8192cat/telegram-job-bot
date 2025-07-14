@@ -173,7 +173,8 @@ class MediaDownloader {
             MediaAttachment(
                 type = MediaType.PHOTO,
                 filePath = filePath,
-                originalFileName = "photo.jpg",
+                // FIXED: Use unique filename with file ID
+                originalFileName = "photo_${photoSize.photo.id}.jpg",
                 fileSize = photoSize.photo.size.toLong(),
                 mimeType = "image/jpeg",
                 caption = caption,
@@ -195,12 +196,14 @@ class MediaDownloader {
             return null
         }
         
-        // Use TDLib metadata first, then fallback
+        // FIXED: Generate unique filename
         val originalFileName = when {
             !video.fileName.isNullOrBlank() && !video.fileName.startsWith("tmp") && video.fileName.contains(".") -> 
-                video.fileName // Use fileName if it looks meaningful
-            !video.fileName.isNullOrBlank() -> video.fileName // Use even temp names as fallback
-            else -> "video.mp4"
+                video.fileName // Use TDLib filename if meaningful
+            !video.fileName.isNullOrBlank() -> 
+                video.fileName // Use even temp names as fallback
+            else -> 
+                "video_${video.video.id}.mp4" // FIXED: Use unique filename with file ID
         }
         
         val filePath = downloadFile(client, video.video.id)
@@ -235,12 +238,14 @@ class MediaDownloader {
             return null
         }
         
-        // Use TDLib metadata first, then fallback
+        // FIXED: Generate unique filename for documents too
         val originalFileName = when {
             !document.fileName.isNullOrBlank() && !document.fileName.startsWith("tmp") && document.fileName.contains(".") -> 
-                document.fileName // Use fileName if it looks meaningful
-            !document.fileName.isNullOrBlank() -> document.fileName // Use even temp names as fallback
-            else -> "document"
+                document.fileName
+            !document.fileName.isNullOrBlank() -> 
+                document.fileName
+            else -> 
+                "document_${document.document.id}" // FIXED: Use unique filename (no extension since unknown type)
         }
         
         val filePath = downloadFile(client, document.document.id)
@@ -299,12 +304,14 @@ class MediaDownloader {
             return null
         }
         
-        // Use TDLib metadata first, then fallback
+        // FIXED: Generate unique filename
         val originalFileName = when {
             !animation.fileName.isNullOrBlank() && !animation.fileName.startsWith("tmp") && animation.fileName.contains(".") -> 
-                animation.fileName // Use fileName if it looks meaningful
-            !animation.fileName.isNullOrBlank() -> animation.fileName // Use even temp names as fallback
-            else -> "animation.gif"
+                animation.fileName
+            !animation.fileName.isNullOrBlank() -> 
+                animation.fileName
+            else -> 
+                "animation_${animation.animation.id}.gif" // FIXED: Use unique filename
         }
         
         val filePath = downloadFile(client, animation.animation.id)
