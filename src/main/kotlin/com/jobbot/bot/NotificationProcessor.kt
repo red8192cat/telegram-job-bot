@@ -722,7 +722,12 @@ class NotificationProcessor(
                 .audio(audio)
                 .caption(content)
                 .parseMode("MarkdownV2")
-                .apply { attachment.duration?.let { duration(it) } }
+                .apply { 
+                    attachment.duration?.let { duration(it) }
+                    // FIXED: Add original metadata from TDLib for proper music display
+                    attachment.performer?.let { performer(it) }
+                    attachment.title?.let { title(it) }
+                }
                 .build()
             
             withTimeout(uploadTimeoutMs) {
@@ -744,6 +749,9 @@ class NotificationProcessor(
                 .apply { 
                     if (!content.isNullOrBlank()) caption(content)
                     attachment.duration?.let { duration(it) }
+                    // FIXED: Add original metadata from TDLib for proper music display
+                    attachment.performer?.let { performer(it) }
+                    attachment.title?.let { title(it) }
                 }
                 .build()
             
