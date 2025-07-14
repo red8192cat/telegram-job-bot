@@ -105,6 +105,10 @@ class MediaDownloader {
     ): MediaAttachment? {
         val audio = content.audio
         
+        // DEBUG: Let's see what TDLib actually gives us
+        logger.debug { "TDLib audio fileName: '${audio.fileName}'" }
+        logger.debug { "TDLib audio mimeType: '${audio.mimeType}'" }
+        
         if (audio.audio.size > MAX_FILE_SIZE) {
             logger.debug { "Audio too large: ${audio.audio.size / 1024 / 1024}MB (limit: ${MAX_FILE_SIZE / 1024 / 1024}MB)" }
             return null
@@ -112,6 +116,11 @@ class MediaDownloader {
         
         val originalFileName = audio.fileName.ifBlank { "audio.mp3" }
         val filePath = downloadFile(client, audio.audio.id)
+        
+        if (filePath != null) {
+            logger.debug { "File path from TDLib: '$filePath'" }
+            logger.debug { "Original fileName we're using: '$originalFileName'" }
+        }
         
         return if (filePath != null) {
             MediaAttachment(

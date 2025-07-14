@@ -32,7 +32,8 @@ object Config {
             tdlibMaxStorageGB = getEnv("TDLIB_MAX_STORAGE_GB")?.toIntOrNull() ?: 2,
             tdlibFileTtlDays = getEnv("TDLIB_FILE_TTL_DAYS")?.toIntOrNull() ?: 7,
             tdlibMaxFileCount = getEnv("TDLIB_MAX_FILE_COUNT")?.toIntOrNull() ?: 5000,
-            tdlibCleanupIntervalHours = getEnv("TDLIB_CLEANUP_INTERVAL_HOURS")?.toIntOrNull() ?: 24
+            tdlibCleanupIntervalHours = getEnv("TDLIB_CLEANUP_INTERVAL_HOURS")?.toIntOrNull() ?: 24,
+            tdlibClearCacheOnStart = getEnv("TDLIB_CLEAR_CACHE_ON_START")?.toBoolean() ?: false
         )
     }
     

@@ -39,6 +39,11 @@ class TelegramUser(
             return
         }
         
+        // Clear TDLib cache on startup if configured
+        if (config.tdlibClearCacheOnStart) {
+            clearTdlibCache()
+        }
+        
         scope.launch {
             try {
                 initializeClient()
@@ -47,6 +52,39 @@ class TelegramUser(
                 ErrorTracker.logError("ERROR", "TelegramUser startup failed: ${e.message}", e)
                 scheduleReconnection()
             }
+        }
+    }
+    
+    // NEW: Clear TDLib cache on startup
+    private fun clearTdlibCache() {
+        try {
+            val tdlibDir = java.io.File("${config.databasePath}_tdlib")
+            if (tdlibDir.exists()) {
+                logger.info { "Clearing TDLib cache directory: ${tdlibDir.absolutePath}" }
+                
+                // Clear files subdirectory (media files)
+                val filesDir = java.io.File(tdlibDir, "files")
+                if (filesDir.exists()) {
+                    val deletedFiles = filesDir.listFiles()?.size ?: 0
+                    filesDir.deleteRecursively()
+                    logger.info { "Cleared $deletedFiles cached media files" }
+                }
+                
+                // Clear temp directories
+                tdlibDir.listFiles()?.forEach { file ->
+                    if (file.isDirectory && (file.name.startsWith("tmp") || file.name == "music")) {
+                        val deletedFiles = file.listFiles()?.size ?: 0
+                        file.deleteRecursively()
+                        logger.info { "Cleared ${file.name} directory: $deletedFiles files" }
+                    }
+                }
+                
+                logger.info { "TDLib cache cleared successfully" }
+            } else {
+                logger.debug { "No TDLib cache directory found to clear" }
+            }
+        } catch (e: Exception) {
+            logger.warn(e) { "Failed to clear TDLib cache: ${e.message}" }
         }
     }
     
