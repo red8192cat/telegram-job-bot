@@ -30,8 +30,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.*
 
 /**
- * FIXED NotificationProcessor with proper document media group support
- * Now correctly sends multiple documents as ONE message instead of separate messages
+ * FIXED NotificationProcessor with proper media group support
+ * Caption placement: LAST item for all media groups (documents, photos, videos)
+ * This ensures text appears AFTER all media, matching original channel behavior
  */
 class NotificationProcessor(
     private val database: Database,
@@ -252,8 +253,8 @@ class NotificationProcessor(
     }
     
     /**
-     * FIXED: Send proper Telegram media group (album) - appears as ONE message with multiple media
-     * Now properly handles documents and other media types
+     * FIXED: Send proper Telegram media group with caption on LAST item
+     * This ensures text appears AFTER all media, matching original channel behavior
      */
     private suspend fun sendProperMediaGroup(
         chatId: String,
@@ -264,7 +265,7 @@ class NotificationProcessor(
         try {
             logger.debug { "Sending proper media group with ${attachments.size} attachments" }
             
-            // FIXED: Check if all attachments are of the same type and can be grouped
+            // Check if all attachments are of the same type and can be grouped
             val attachmentTypes = attachments.map { it.type }.distinct()
             
             when {
@@ -309,33 +310,28 @@ class NotificationProcessor(
                     return totalSuccess > 0
                 }
                 
-                // Case 2: All same type - try to send as media group if supported
+                // Case 2: All same type
                 attachmentTypes.size == 1 -> {
                     val singleType = attachmentTypes.first()
                     
                     when (singleType) {
                         MediaType.PHOTO, MediaType.VIDEO -> {
-                            // Photos and videos can always be grouped
+                            // Photos and videos can always be grouped properly
                             return sendTelegramMediaGroup(chatId, attachments, markdownContent, plainContent)
                         }
                         
                         MediaType.DOCUMENT -> {
-                            // FIXED: Try to send documents as a group first, fallback to individual
+                            // FIXED: For documents, try media group (caption on last document)
                             logger.debug { "Attempting to send ${attachments.size} documents as media group" }
                             
-                            try {
-                                // Attempt to send documents as media group
-                                val success = sendTelegramDocumentGroup(chatId, attachments, markdownContent, plainContent)
-                                if (success) {
-                                    logger.info { "✅ Successfully sent ${attachments.size} documents as media group" }
-                                    return true
-                                }
-                            } catch (e: Exception) {
-                                logger.debug(e) { "Document media group failed, falling back to individual sends" }
+                            val success = sendTelegramDocumentGroup(chatId, attachments, markdownContent, plainContent)
+                            if (success) {
+                                logger.info { "✅ Successfully sent ${attachments.size} documents as media group" }
+                                return true
+                            } else {
+                                logger.warn { "❌ Document media group failed, falling back to individual sends" }
+                                return sendDocumentsIndividually(chatId, attachments, markdownContent, plainContent)
                             }
-                            
-                            // Fallback: Send documents individually
-                            return sendDocumentsIndividually(chatId, attachments, markdownContent, plainContent)
                         }
                         
                         else -> {
@@ -358,8 +354,8 @@ class NotificationProcessor(
     }
 
     /**
-     * NEW: Try to send documents as a Telegram media group
-     * Note: Telegram supports document media groups, but with limitations
+     * FIXED: Try to send documents as a Telegram media group with caption on LAST document
+     * This ensures text appears after all documents, not in the middle
      */
     private suspend fun sendTelegramDocumentGroup(
         chatId: String,
@@ -380,13 +376,15 @@ class NotificationProcessor(
                     continue
                 }
                 
-                // Only first item gets caption
-                val caption = if (i == 0) markdownContent else null
-                val parseMode = if (i == 0 && !markdownContent.isNullOrBlank()) "MarkdownV2" else null
+                // FIXED: Put caption on the LAST document instead of first
+                val isLastDocument = i == attachments.size - 1
+                val caption = if (isLastDocument) markdownContent else null
+                val parseMode = if (isLastDocument && !markdownContent.isNullOrBlank()) "MarkdownV2" else null
                 
                 val documentBuilder = InputMediaDocument.builder()
                     .media(file, attachment.actualFileName)
                 
+                // Only add caption and parseMode to the last document
                 if (caption != null) {
                     documentBuilder.caption(caption)
                 }
@@ -413,7 +411,7 @@ class NotificationProcessor(
                     }
                 }
                 
-                logger.info { "✅ Sent document media group with ${mediaList.size} items (MarkdownV2)" }
+                logger.info { "✅ Sent document media group with ${mediaList.size} items (caption on last document)" }
                 markdownSuccess++
                 true
                 
@@ -421,7 +419,7 @@ class NotificationProcessor(
                 if (isFormattingError(e)) {
                     logger.debug { "MarkdownV2 failed for document group, retrying with plain text" }
                     
-                    // Recreate with plain text
+                    // Recreate with plain text caption only on last document
                     val plainMediaList = mutableListOf<InputMedia>()
                     
                     for (i in attachments.indices) {
@@ -429,7 +427,9 @@ class NotificationProcessor(
                         val file = File(attachment.filePath)
                         if (!file.exists()) continue
                         
-                        val caption = if (i == 0) plainContent else null
+                        // FIXED: Put caption on the LAST document
+                        val isLastDocument = i == attachments.size - 1
+                        val caption = if (isLastDocument) plainContent else null
                         
                         val documentBuilder = InputMediaDocument.builder()
                             .media(file, attachment.actualFileName)
@@ -449,7 +449,7 @@ class NotificationProcessor(
                         }
                     }
                     
-                    logger.info { "✅ Sent document media group with ${plainMediaList.size} items (plain text)" }
+                    logger.info { "✅ Sent document media group with ${plainMediaList.size} items (plain text on last)" }
                     plainFallback++
                     true
                     
@@ -465,7 +465,7 @@ class NotificationProcessor(
     }
 
     /**
-     * NEW: Send documents individually as fallback
+     * Send documents individually as fallback
      */
     private suspend fun sendDocumentsIndividually(
         chatId: String,
@@ -510,7 +510,7 @@ class NotificationProcessor(
     }
 
     /**
-     * NEW: Send other media types individually
+     * Send other media types individually
      */
     private suspend fun sendMediaIndividually(
         chatId: String,
@@ -549,9 +549,10 @@ class NotificationProcessor(
         
         return successCount > 0
     }
-
+    
     /**
-     * Send Telegram media group using correct API v9.x (for photos/videos)
+     * FIXED: Send Telegram media group with caption on LAST item (for photos/videos)
+     * This ensures text appears after all media, matching original channel behavior
      */
     private suspend fun sendTelegramMediaGroup(
         chatId: String,
@@ -572,9 +573,10 @@ class NotificationProcessor(
                     continue
                 }
                 
-                // Only first item gets caption
-                val caption = if (i == 0) markdownContent else null
-                val parseMode = if (i == 0 && !markdownContent.isNullOrBlank()) "MarkdownV2" else null
+                // FIXED: Put caption on LAST item instead of first
+                val isLastItem = i == attachments.size - 1
+                val caption = if (isLastItem) markdownContent else null
+                val parseMode = if (isLastItem && !markdownContent.isNullOrBlank()) "MarkdownV2" else null
                 
                 val media = when (attachment.type) {
                     MediaType.PHOTO -> {
@@ -639,7 +641,7 @@ class NotificationProcessor(
                     }
                 }
                 
-                logger.info { "✅ Sent media group album with ${mediaList.size} items (MarkdownV2)" }
+                logger.info { "✅ Sent media group album with ${mediaList.size} items (caption on last item)" }
                 markdownSuccess++
                 true
                 
@@ -647,7 +649,7 @@ class NotificationProcessor(
                 if (isFormattingError(e)) {
                     logger.debug { "MarkdownV2 failed, retrying with plain text" }
                     
-                    // Recreate with plain text
+                    // Recreate with plain text caption on last item
                     val plainMediaList = mutableListOf<InputMedia>()
                     
                     for (i in attachments.indices) {
@@ -655,7 +657,8 @@ class NotificationProcessor(
                         val file = File(attachment.filePath)
                         if (!file.exists() || (attachment.type != MediaType.PHOTO && attachment.type != MediaType.VIDEO)) continue
                         
-                        val caption = if (i == 0) plainContent else null
+                        val isLastItem = i == attachments.size - 1
+                        val caption = if (isLastItem) plainContent else null
                         
                         val media = when (attachment.type) {
                             MediaType.PHOTO -> {
@@ -704,7 +707,7 @@ class NotificationProcessor(
                         }
                     }
                     
-                    logger.info { "✅ Sent media group album with ${plainMediaList.size} items (plain text)" }
+                    logger.info { "✅ Sent media group album with ${plainMediaList.size} items (plain text on last)" }
                     plainFallback++
                     true
                     
