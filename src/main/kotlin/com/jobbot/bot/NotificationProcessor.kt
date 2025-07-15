@@ -1,6 +1,9 @@
 package com.jobbot.bot
 
 import com.jobbot.data.Database
+import com.jobbot.data.models.BotConfig
+import com.jobbot.data.models.MediaAttachment
+import com.jobbot.data.models.MediaType
 import com.jobbot.data.models.NotificationMessage
 import com.jobbot.infrastructure.monitoring.ErrorTracker
 import com.jobbot.infrastructure.security.RateLimiter
@@ -10,38 +13,63 @@ import com.jobbot.shared.utils.TelegramMarkdownConverter
 import kotlinx.coroutines.*
 import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage
+import org.telegram.telegrambots.meta.api.methods.send.SendPhoto
+import org.telegram.telegrambots.meta.api.methods.send.SendVideo
+import org.telegram.telegrambots.meta.api.methods.send.SendDocument
+import org.telegram.telegrambots.meta.api.methods.send.SendAudio
+import org.telegram.telegrambots.meta.api.methods.send.SendVoice
+import org.telegram.telegrambots.meta.api.methods.send.SendAnimation
+import org.telegram.telegrambots.meta.api.methods.send.SendMediaGroup
+import org.telegram.telegrambots.meta.api.objects.media.*
+import org.telegram.telegrambots.meta.api.objects.InputFile
 import org.telegram.telegrambots.meta.api.objects.LinkPreviewOptions
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException
+import java.io.File
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ConcurrentHashMap
+import java.util.*
 
 /**
- * CLEANED NotificationProcessor - Removed redundant pre-validation
- * 
- * Format:
- * 1. "New match from [channel]"
- * 2. Link to original post (if available)
- * 3. Original content with all formatting preserved
- * 
- * Strategy: Try MarkdownV2 first, fallback to plain text on API errors
+ * FIXED NotificationProcessor with proper media group support
+ * Caption placement: LAST item for all media groups (documents, photos, videos)
+ * This ensures text appears AFTER all media, matching original channel behavior
  */
 class NotificationProcessor(
     private val database: Database,
     private val rateLimiter: RateLimiter,
-    private val telegramClient: OkHttpTelegramClient
+    private val telegramClient: OkHttpTelegramClient,
+    private val config: BotConfig
 ) {
     private val logger = getLogger("NotificationProcessor")
     
     private val notificationQueue = LinkedBlockingQueue<NotificationMessage>(1000)
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     
-    // Simple tracking
+    // Convert configured timeout to milliseconds
+    private val uploadTimeoutMs = config.mediaUploadTimeoutSeconds * 1000L
+    
+    // Media reuse tracking - keyed by original message content hash
+    private val mediaCache = ConcurrentHashMap<String, CachedMediaGroup>()
+    
+    // Enhanced tracking
     private var markdownSuccess = 0
     private var plainFallback = 0
     private var totalNotifications = 0
+    private var mediaNotifications = 0
+    private var mediaReusedCount = 0
+    
+    // Data class for cached media
+    private data class CachedMediaGroup(
+        val attachments: List<MediaAttachment>,
+        val createdTime: Long = System.currentTimeMillis(),
+        var useCount: Int = 0
+    )
     
     init {
         startNotificationProcessor()
         startPeriodicStatsLogging()
+        startMediaCacheCleanup()
+        logger.info { "NotificationProcessor initialized with ${config.mediaUploadTimeoutSeconds}s media upload timeout" }
     }
     
     fun queueNotification(notification: NotificationMessage) {
@@ -49,8 +77,9 @@ class NotificationProcessor(
             val queued = notificationQueue.offer(notification, 100, java.util.concurrent.TimeUnit.MILLISECONDS)
             if (!queued) {
                 logger.warn { "Notification queue full, dropping notification for user ${notification.userId}" }
+                // No cleanup needed - TDLib manages files
             } else {
-                logger.debug { "Notification queued for user ${notification.userId}" }
+                logger.debug { "Notification queued for user ${notification.userId} with ${notification.mediaAttachments.size} attachments" }
             }
         } catch (e: Exception) {
             logger.error(e) { "Failed to queue notification" }
@@ -58,9 +87,49 @@ class NotificationProcessor(
         }
     }
     
+    /**
+     * Queue multiple notifications efficiently - with media reuse optimization
+     */
+    fun queueNotifications(notifications: List<NotificationMessage>) {
+        if (notifications.isEmpty()) return
+        
+        // Check if we can reuse media for these notifications
+        val firstNotification = notifications.first()
+        if (firstNotification.mediaAttachments.isNotEmpty()) {
+            optimizeMediaForBatch(notifications)
+        }
+        
+        notifications.forEach { queueNotification(it) }
+    }
+    
+    /**
+     * Optimize media usage for a batch of notifications with the same media
+     */
+    private fun optimizeMediaForBatch(notifications: List<NotificationMessage>) {
+        val mediaAttachments = notifications.first().mediaAttachments
+        if (mediaAttachments.isEmpty()) return
+        
+        // Create a cache key based on media content
+        val cacheKey = createMediaCacheKey(notifications.first())
+        
+        // Cache the media group for reuse
+        mediaCache[cacheKey] = CachedMediaGroup(mediaAttachments, useCount = notifications.size)
+        
+        logger.debug { "Cached media group for ${notifications.size} notifications (key: ${cacheKey.take(8)}...)" }
+    }
+    
+    private fun createMediaCacheKey(notification: NotificationMessage): String {
+        // Create a unique key based on message content and media info
+        val contentHash = "${notification.messageText}-${notification.channelName}".hashCode()
+        val mediaInfo = notification.mediaAttachments.joinToString(",") { 
+            "${it.type}:${it.originalFileName}:${it.fileSize}" 
+        }
+        return "$contentHash-${mediaInfo.hashCode()}"
+    }
+
     private fun startNotificationProcessor() {
         scope.launch {
-            logger.info { "Notification processor started with simplified formatting" }
+            logger.info { "Notification processor started with media attachment support and reuse optimization" }
             
             while (isActive) {
                 try {
@@ -100,15 +169,37 @@ class NotificationProcessor(
             val user = database.getUser(notification.userId)
             val language = user?.language ?: "en"
             
-            // Build the simple message
-            val (markdownContent, plainContent) = buildSimpleMessage(notification, language)
+            // Track media notifications
+            if (notification.mediaAttachments.isNotEmpty()) {
+                mediaNotifications++
+                logger.debug { "Processing notification with ${notification.mediaAttachments.size} media attachments" }
+            }
             
-            // Try MarkdownV2 first, then fallback to plain text
-            val success = tryMarkdownV2(notification.userId.toString(), markdownContent) ||
-                         sendPlainText(notification.userId.toString(), plainContent)
+            // Send notification with media attachments
+            val success = if (notification.mediaAttachments.isNotEmpty()) {
+                sendNotificationWithMedia(notification, language)
+            } else {
+                sendTextNotification(notification, language)
+            }
             
             if (success) {
                 logger.debug { "Notification delivered to user ${notification.userId}" }
+                
+                // Check if this is the last user for this media group
+                val cacheKey = createMediaCacheKey(notification)
+                val cachedGroup = mediaCache[cacheKey]
+                if (cachedGroup != null) {
+                    cachedGroup.useCount--
+                    if (cachedGroup.useCount <= 0) {
+                        // Last user - remove from cache (no file cleanup needed)
+                        mediaCache.remove(cacheKey)
+                        logger.debug { "Last user for media group, removing from cache" }
+                    } else {
+                        // Other users still need this media
+                        mediaReusedCount++
+                        logger.debug { "Media reused, ${cachedGroup.useCount} users remaining" }
+                    }
+                }
             } else {
                 logger.warn { "Failed to deliver notification to user ${notification.userId}" }
             }
@@ -127,16 +218,927 @@ class NotificationProcessor(
             logger.error(e) { "Unexpected error for user ${notification.userId}" }
             ErrorTracker.logError("ERROR", "Notification processing error: ${e.message}", e)
         }
+        
+        // NO MEDIA CLEANUP - TDLib manages its own files
+    }
+    
+    /**
+     * Send notification with media attachments using proper Telegram media group
+     */
+    private suspend fun sendNotificationWithMedia(
+        notification: NotificationMessage,
+        language: String
+    ): Boolean {
+        try {
+            val chatId = notification.userId.toString()
+            val (markdownContent, plainContent) = buildSimpleMessage(notification, language)
+            
+            if (notification.mediaAttachments.isEmpty()) {
+                return sendTextNotification(notification, language)
+            }
+            
+            if (notification.mediaAttachments.size == 1) {
+                // Single attachment - send with caption
+                val attachment = notification.mediaAttachments.first()
+                return sendMediaAttachment(chatId, attachment, markdownContent, plainContent)
+            } else {
+                // Multiple attachments - use FIXED media group logic
+                return sendProperMediaGroup(chatId, notification.mediaAttachments, markdownContent, plainContent)
+            }
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Failed to send notification with media for user ${notification.userId}" }
+            return false
+        }
+    }
+    
+    /**
+     * FIXED: Send proper Telegram media group with caption on LAST item
+     * This ensures text appears AFTER all media, matching original channel behavior
+     */
+    private suspend fun sendProperMediaGroup(
+        chatId: String,
+        attachments: List<MediaAttachment>,
+        markdownContent: String?,
+        plainContent: String?
+    ): Boolean {
+        try {
+            logger.debug { "Sending proper media group with ${attachments.size} attachments" }
+            
+            // Check if all attachments are of the same type and can be grouped
+            val attachmentTypes = attachments.map { it.type }.distinct()
+            
+            when {
+                // Case 1: Mixed types - send photos/videos as group, others individually
+                attachmentTypes.size > 1 -> {
+                    val groupableAttachments = attachments.filter { 
+                        it.type == MediaType.PHOTO || it.type == MediaType.VIDEO 
+                    }
+                    val otherAttachments = attachments.filter { 
+                        it.type != MediaType.PHOTO && it.type != MediaType.VIDEO 
+                    }
+                    
+                    var mainGroupSent = false
+                    
+                    // Send the main media group (photos + videos) if any
+                    if (groupableAttachments.isNotEmpty()) {
+                        mainGroupSent = sendTelegramMediaGroup(chatId, groupableAttachments, markdownContent, plainContent)
+                    }
+                    
+                    // Send other attachment types individually
+                    var othersSent = 0
+                    for (attachment in otherAttachments) {
+                        try {
+                            // Only add caption to first other attachment if no main group was sent
+                            val shouldAddCaption = !mainGroupSent && othersSent == 0
+                            val sent = sendMediaAttachment(
+                                chatId, 
+                                attachment, 
+                                if (shouldAddCaption) markdownContent else null,
+                                if (shouldAddCaption) plainContent else null
+                            )
+                            if (sent) othersSent++
+                            delay(300) // Small delay between different types
+                        } catch (e: Exception) {
+                            logger.warn(e) { "Failed to send ${attachment.type} attachment" }
+                        }
+                    }
+                    
+                    val totalSuccess = (if (mainGroupSent) 1 else 0) + othersSent
+                    logger.info { "Mixed media group result: main group=${if (mainGroupSent) "✅" else "❌"}, others=$othersSent/${otherAttachments.size}" }
+                    
+                    return totalSuccess > 0
+                }
+                
+                // Case 2: All same type
+                attachmentTypes.size == 1 -> {
+                    val singleType = attachmentTypes.first()
+                    
+                    when (singleType) {
+                        MediaType.PHOTO, MediaType.VIDEO -> {
+                            // Photos and videos can always be grouped properly
+                            return sendTelegramMediaGroup(chatId, attachments, markdownContent, plainContent)
+                        }
+                        
+                        MediaType.DOCUMENT -> {
+                            // FIXED: For documents, try media group (caption on last document)
+                            logger.debug { "Attempting to send ${attachments.size} documents as media group" }
+                            
+                            val success = sendTelegramDocumentGroup(chatId, attachments, markdownContent, plainContent)
+                            if (success) {
+                                logger.info { "✅ Successfully sent ${attachments.size} documents as media group" }
+                                return true
+                            } else {
+                                logger.warn { "❌ Document media group failed, falling back to individual sends" }
+                                return sendDocumentsIndividually(chatId, attachments, markdownContent, plainContent)
+                            }
+                        }
+                        
+                        else -> {
+                            // Audio, voice, animation - send individually with caption on first
+                            return sendMediaIndividually(chatId, attachments, markdownContent, plainContent)
+                        }
+                    }
+                }
+                
+                else -> {
+                    logger.warn { "No attachments to send in media group" }
+                    return false
+                }
+            }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error in sendProperMediaGroup" }
+            return false
+        }
+    }
+
+    /**
+     * FIXED: Try to send documents as a Telegram media group with caption on LAST document
+     * This ensures text appears after all documents, not in the middle
+     */
+    private suspend fun sendTelegramDocumentGroup(
+        chatId: String,
+        attachments: List<MediaAttachment>,
+        markdownContent: String?,
+        plainContent: String?
+    ): Boolean {
+        try {
+            // Create media list with InputMediaDocument objects
+            val mediaList = mutableListOf<InputMedia>()
+            
+            for (i in attachments.indices) {
+                val attachment = attachments[i]
+                val file = File(attachment.filePath)
+                
+                if (!file.exists()) {
+                    logger.warn { "Media file not found: ${attachment.filePath}" }
+                    continue
+                }
+                
+                // FIXED: Put caption on the LAST document instead of first
+                val isLastDocument = i == attachments.size - 1
+                val caption = if (isLastDocument) markdownContent else null
+                val parseMode = if (isLastDocument && !markdownContent.isNullOrBlank()) "MarkdownV2" else null
+                
+                val documentBuilder = InputMediaDocument.builder()
+                    .media(file, attachment.actualFileName)
+                
+                // Only add caption and parseMode to the last document
+                if (caption != null) {
+                    documentBuilder.caption(caption)
+                }
+                if (parseMode != null) {
+                    documentBuilder.parseMode(parseMode)
+                }
+                
+                mediaList.add(documentBuilder.build())
+            }
+            
+            if (mediaList.isEmpty()) {
+                logger.warn { "No valid documents for media group" }
+                return false
+            }
+            
+            // Create the sendMediaGroup request
+            val sendMediaGroup = SendMediaGroup(chatId, mediaList)
+            
+            // Try to send with MarkdownV2 first
+            return try {
+                withTimeout(uploadTimeoutMs) {
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(sendMediaGroup)
+                    }
+                }
+                
+                logger.info { "✅ Sent document media group with ${mediaList.size} items (caption on last document)" }
+                markdownSuccess++
+                true
+                
+            } catch (e: TelegramApiException) {
+                if (isFormattingError(e)) {
+                    logger.debug { "MarkdownV2 failed for document group, retrying with plain text" }
+                    
+                    // Recreate with plain text caption only on last document
+                    val plainMediaList = mutableListOf<InputMedia>()
+                    
+                    for (i in attachments.indices) {
+                        val attachment = attachments[i]
+                        val file = File(attachment.filePath)
+                        if (!file.exists()) continue
+                        
+                        // FIXED: Put caption on the LAST document
+                        val isLastDocument = i == attachments.size - 1
+                        val caption = if (isLastDocument) plainContent else null
+                        
+                        val documentBuilder = InputMediaDocument.builder()
+                            .media(file, attachment.actualFileName)
+                        
+                        if (caption != null) {
+                            documentBuilder.caption(caption)
+                        }
+                        
+                        plainMediaList.add(documentBuilder.build())
+                    }
+                    
+                    val plainSendMediaGroup = SendMediaGroup(chatId, plainMediaList)
+                    
+                    withTimeout(uploadTimeoutMs) {
+                        withContext(Dispatchers.IO) {
+                            telegramClient.execute(plainSendMediaGroup)
+                        }
+                    }
+                    
+                    logger.info { "✅ Sent document media group with ${plainMediaList.size} items (plain text on last)" }
+                    plainFallback++
+                    true
+                    
+                } else {
+                    throw e
+                }
+            }
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Failed to send document media group: ${e.message}" }
+            return false
+        }
+    }
+
+    /**
+     * Send documents individually as fallback
+     */
+    private suspend fun sendDocumentsIndividually(
+        chatId: String,
+        attachments: List<MediaAttachment>,
+        markdownContent: String?,
+        plainContent: String?
+    ): Boolean {
+        logger.info { "Sending ${attachments.size} documents individually" }
+        
+        var successCount = 0
+        
+        for (i in attachments.indices) {
+            val attachment = attachments[i]
+            
+            try {
+                // Only first document gets caption
+                val shouldAddCaption = i == 0
+                val sent = sendMediaAttachment(
+                    chatId,
+                    attachment,
+                    if (shouldAddCaption) markdownContent else null,
+                    if (shouldAddCaption) plainContent else null
+                )
+                
+                if (sent) {
+                    successCount++
+                    logger.debug { "✅ Sent individual document ${i + 1}/${attachments.size}: ${attachment.actualFileName}" }
+                }
+                
+                // Small delay between documents
+                if (i < attachments.size - 1) {
+                    delay(500)
+                }
+                
+            } catch (e: Exception) {
+                logger.warn(e) { "Failed to send document ${i + 1}/${attachments.size}: ${attachment.actualFileName}" }
+            }
+        }
+        
+        logger.info { "Individual documents result: $successCount/${attachments.size} sent successfully" }
+        return successCount > 0
+    }
+
+    /**
+     * Send other media types individually
+     */
+    private suspend fun sendMediaIndividually(
+        chatId: String,
+        attachments: List<MediaAttachment>,
+        markdownContent: String?,
+        plainContent: String?
+    ): Boolean {
+        logger.debug { "Sending ${attachments.size} ${attachments.first().type} attachments individually" }
+        
+        var successCount = 0
+        
+        for (i in attachments.indices) {
+            val attachment = attachments[i]
+            
+            try {
+                // Only first item gets caption
+                val shouldAddCaption = i == 0
+                val sent = sendMediaAttachment(
+                    chatId,
+                    attachment,
+                    if (shouldAddCaption) markdownContent else null,
+                    if (shouldAddCaption) plainContent else null
+                )
+                
+                if (sent) successCount++
+                
+                // Small delay between items
+                if (i < attachments.size - 1) {
+                    delay(300)
+                }
+                
+            } catch (e: Exception) {
+                logger.warn(e) { "Failed to send ${attachment.type} attachment: ${attachment.actualFileName}" }
+            }
+        }
+        
+        return successCount > 0
+    }
+    
+    /**
+     * FIXED: Send Telegram media group with caption on LAST item (for photos/videos)
+     * This ensures text appears after all media, matching original channel behavior
+     */
+    private suspend fun sendTelegramMediaGroup(
+        chatId: String,
+        attachments: List<MediaAttachment>,
+        markdownContent: String?,
+        plainContent: String?
+    ): Boolean {
+        try {
+            // Create media list with proper InputMedia objects
+            val mediaList = mutableListOf<InputMedia>()
+            
+            for (i in attachments.indices) {
+                val attachment = attachments[i]
+                val file = File(attachment.filePath)
+                
+                if (!file.exists()) {
+                    logger.warn { "Media file not found: ${attachment.filePath}" }
+                    continue
+                }
+                
+                // FIXED: Put caption on LAST item instead of first
+                val isLastItem = i == attachments.size - 1
+                val caption = if (isLastItem) markdownContent else null
+                val parseMode = if (isLastItem && !markdownContent.isNullOrBlank()) "MarkdownV2" else null
+                
+                val media = when (attachment.type) {
+                    MediaType.PHOTO -> {
+                        val photoBuilder = InputMediaPhoto.builder()
+                            .media(file, attachment.actualFileName)
+                        
+                        if (caption != null) {
+                            photoBuilder.caption(caption)
+                        }
+                        if (parseMode != null) {
+                            photoBuilder.parseMode(parseMode)
+                        }
+                        
+                        photoBuilder.build()
+                    }
+                    
+                    MediaType.VIDEO -> {
+                        val videoBuilder = InputMediaVideo.builder()
+                            .media(file, attachment.actualFileName)
+                        
+                        if (caption != null) {
+                            videoBuilder.caption(caption)
+                        }
+                        if (parseMode != null) {
+                            videoBuilder.parseMode(parseMode)
+                        }
+                        attachment.width?.let { videoBuilder.width(it) }
+                        attachment.height?.let { videoBuilder.height(it) }
+                        attachment.duration?.let { videoBuilder.duration(it) }
+                        
+                        // Add thumbnail for media group videos
+                        attachment.thumbnailPath?.let { thumbPath ->
+                            val thumbnailFile = File(thumbPath)
+                            if (thumbnailFile.exists()) {
+                                logger.debug { "Using video thumbnail in media group: $thumbPath" }
+                                videoBuilder.thumbnail(InputFile(thumbnailFile))
+                            }
+                        }
+                        
+                        videoBuilder.build()
+                    }
+                    
+                    else -> continue // Skip non-groupable types
+                }
+                
+                mediaList.add(media)
+            }
+            
+            if (mediaList.isEmpty()) {
+                logger.warn { "No groupable media items found" }
+                return false
+            }
+            
+            // Create the sendMediaGroup request
+            val sendMediaGroup = SendMediaGroup(chatId, mediaList)
+            
+            // Try to send with MarkdownV2 first
+            val success = try {
+                withTimeout(uploadTimeoutMs) {
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(sendMediaGroup)
+                    }
+                }
+                
+                logger.info { "✅ Sent media group album with ${mediaList.size} items (caption on last item)" }
+                markdownSuccess++
+                true
+                
+            } catch (e: TelegramApiException) {
+                if (isFormattingError(e)) {
+                    logger.debug { "MarkdownV2 failed, retrying with plain text" }
+                    
+                    // Recreate with plain text caption on last item
+                    val plainMediaList = mutableListOf<InputMedia>()
+                    
+                    for (i in attachments.indices) {
+                        val attachment = attachments[i]
+                        val file = File(attachment.filePath)
+                        if (!file.exists() || (attachment.type != MediaType.PHOTO && attachment.type != MediaType.VIDEO)) continue
+                        
+                        val isLastItem = i == attachments.size - 1
+                        val caption = if (isLastItem) plainContent else null
+                        
+                        val media = when (attachment.type) {
+                            MediaType.PHOTO -> {
+                                val photoBuilder = InputMediaPhoto.builder()
+                                    .media(file, attachment.actualFileName)
+                                
+                                if (caption != null) {
+                                    photoBuilder.caption(caption)
+                                }
+                                
+                                photoBuilder.build()
+                            }
+                            MediaType.VIDEO -> {
+                                val videoBuilder = InputMediaVideo.builder()
+                                    .media(file, attachment.actualFileName)
+                                
+                                if (caption != null) {
+                                    videoBuilder.caption(caption)
+                                }
+                                attachment.width?.let { videoBuilder.width(it) }
+                                attachment.height?.let { videoBuilder.height(it) }
+                                attachment.duration?.let { videoBuilder.duration(it) }
+                                
+                                // Add thumbnail for plain text media group too
+                                attachment.thumbnailPath?.let { thumbPath ->
+                                    val thumbnailFile = File(thumbPath)
+                                    if (thumbnailFile.exists()) {
+                                        logger.debug { "Using video thumbnail in plain media group: $thumbPath" }
+                                        videoBuilder.thumbnail(InputFile(thumbnailFile))
+                                    }
+                                }
+                                
+                                videoBuilder.build()
+                            }
+                            else -> continue
+                        }
+                        
+                        plainMediaList.add(media)
+                    }
+                    
+                    val plainSendMediaGroup = SendMediaGroup(chatId, plainMediaList)
+                    
+                    withTimeout(uploadTimeoutMs) {
+                        withContext(Dispatchers.IO) {
+                            telegramClient.execute(plainSendMediaGroup)
+                        }
+                    }
+                    
+                    logger.info { "✅ Sent media group album with ${plainMediaList.size} items (plain text on last)" }
+                    plainFallback++
+                    true
+                    
+                } else {
+                    throw e
+                }
+            }
+            
+            return success
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to send Telegram media group" }
+            return false
+        }
+    }
+    
+    /**
+     * Send individual media attachment with thumbnails support
+     */
+    private suspend fun sendMediaAttachment(
+        chatId: String,
+        attachment: MediaAttachment,
+        markdownContent: String?,
+        plainContent: String?
+    ): Boolean {
+        return try {
+            val file = File(attachment.filePath)
+            if (!file.exists()) {
+                logger.warn { "Media file not found: ${attachment.filePath}" }
+                return false
+            }
+            
+            // Create InputFile with proper filename
+            val inputFile = InputFile(file, attachment.actualFileName)
+            
+            // Try MarkdownV2 first, then fallback to plain text
+            val success = when (attachment.type) {
+                MediaType.PHOTO -> {
+                    tryMarkdownPhoto(chatId, inputFile, markdownContent) ||
+                    sendPlainPhoto(chatId, inputFile, plainContent)
+                }
+                
+                MediaType.VIDEO -> {
+                    tryMarkdownVideo(chatId, inputFile, markdownContent, attachment) ||
+                    sendPlainVideo(chatId, inputFile, plainContent, attachment)
+                }
+                
+                MediaType.ANIMATION -> {
+                    tryMarkdownAnimation(chatId, inputFile, markdownContent, attachment) ||
+                    sendPlainAnimation(chatId, inputFile, plainContent, attachment)
+                }
+                
+                MediaType.DOCUMENT -> {
+                    tryMarkdownDocument(chatId, inputFile, markdownContent, attachment) ||
+                    sendPlainDocument(chatId, inputFile, plainContent, attachment)
+                }
+                
+                MediaType.AUDIO -> {
+                    tryMarkdownAudio(chatId, inputFile, markdownContent, attachment) ||
+                    sendPlainAudio(chatId, inputFile, plainContent, attachment)
+                }
+                
+                MediaType.VOICE -> {
+                    tryMarkdownVoice(chatId, inputFile, markdownContent, attachment) ||
+                    sendPlainVoice(chatId, inputFile, plainContent, attachment)
+                }
+            }
+            
+            if (success) {
+                logger.debug { "✅ Sent ${attachment.type} attachment: ${attachment.actualFileName}" }
+            }
+            
+            success
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Error sending media attachment: ${attachment.filePath}" }
+            false
+        }
+    }
+    
+    // Photo sending methods
+    private suspend fun tryMarkdownPhoto(chatId: String, photo: InputFile, content: String?): Boolean {
+        if (content.isNullOrBlank()) return false
+        
+        return try {
+            val sendPhoto = SendPhoto.builder()
+                .chatId(chatId)
+                .photo(photo)
+                .caption(content)
+                .parseMode("MarkdownV2")
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendPhoto)
+                }
+            }
+            true
+        } catch (e: TelegramApiException) {
+            if (isFormattingError(e)) false else throw e
+        }
+    }
+    
+    private suspend fun sendPlainPhoto(chatId: String, photo: InputFile, content: String?): Boolean {
+        return try {
+            val sendPhoto = SendPhoto.builder()
+                .chatId(chatId)
+                .photo(photo)
+                .apply { if (!content.isNullOrBlank()) caption(content) }
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendPhoto)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to send photo" }
+            false
+        }
+    }
+    
+    // Video sending methods with thumbnail support
+    private suspend fun tryMarkdownVideo(chatId: String, video: InputFile, content: String?, attachment: MediaAttachment): Boolean {
+        if (content.isNullOrBlank()) return false
+        
+        return try {
+            val sendVideo = SendVideo.builder()
+                .chatId(chatId)
+                .video(video)
+                .caption(content)
+                .parseMode("MarkdownV2")
+                .apply {
+                    attachment.width?.let { width(it) }
+                    attachment.height?.let { height(it) }
+                    attachment.duration?.let { duration(it) }
+                    
+                    // Add thumbnail if available
+                    attachment.thumbnailPath?.let { thumbPath ->
+                        val thumbnailFile = File(thumbPath)
+                        if (thumbnailFile.exists()) {
+                            logger.debug { "Using video thumbnail: $thumbPath" }
+                            thumbnail(InputFile(thumbnailFile))
+                        }
+                    }
+                }
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendVideo)
+                }
+            }
+            true
+        } catch (e: TelegramApiException) {
+            if (isFormattingError(e)) false else throw e
+        }
+    }
+    
+    private suspend fun sendPlainVideo(chatId: String, video: InputFile, content: String?, attachment: MediaAttachment): Boolean {
+        return try {
+            val sendVideo = SendVideo.builder()
+                .chatId(chatId)
+                .video(video)
+                .apply { 
+                    if (!content.isNullOrBlank()) caption(content)
+                    attachment.width?.let { width(it) }
+                    attachment.height?.let { height(it) }
+                    attachment.duration?.let { duration(it) }
+                    
+                    // Add thumbnail if available
+                    attachment.thumbnailPath?.let { thumbPath ->
+                        val thumbnailFile = File(thumbPath)
+                        if (thumbnailFile.exists()) {
+                            logger.debug { "Using video thumbnail: $thumbPath" }
+                            thumbnail(InputFile(thumbnailFile))
+                        }
+                    }
+                }
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendVideo)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to send video" }
+            false
+        }
+    }
+    
+    // Animation sending methods with thumbnail support
+    private suspend fun tryMarkdownAnimation(chatId: String, animation: InputFile, content: String?, attachment: MediaAttachment): Boolean {
+        if (content.isNullOrBlank()) return false
+        
+        return try {
+            val sendAnimation = SendAnimation.builder()
+                .chatId(chatId)
+                .animation(animation)
+                .caption(content)
+                .parseMode("MarkdownV2")
+                .apply {
+                    attachment.width?.let { width(it) }
+                    attachment.height?.let { height(it) }
+                    attachment.duration?.let { duration(it) }
+                    
+                    // Add thumbnail for animations if available
+                    attachment.thumbnailPath?.let { thumbPath ->
+                        val thumbnailFile = File(thumbPath)
+                        if (thumbnailFile.exists()) {
+                            logger.debug { "Using animation thumbnail: $thumbPath" }
+                            thumbnail(InputFile(thumbnailFile))
+                        }
+                    }
+                }
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendAnimation)
+                }
+            }
+            true
+        } catch (e: TelegramApiException) {
+            if (isFormattingError(e)) false else throw e
+        }
+    }
+    
+    private suspend fun sendPlainAnimation(chatId: String, animation: InputFile, content: String?, attachment: MediaAttachment): Boolean {
+        return try {
+            val sendAnimation = SendAnimation.builder()
+                .chatId(chatId)
+                .animation(animation)
+                .apply { 
+                    if (!content.isNullOrBlank()) caption(content)
+                    attachment.width?.let { width(it) }
+                    attachment.height?.let { height(it) }
+                    attachment.duration?.let { duration(it) }
+                    
+                    // Add thumbnail for animations if available
+                    attachment.thumbnailPath?.let { thumbPath ->
+                        val thumbnailFile = File(thumbPath)
+                        if (thumbnailFile.exists()) {
+                            logger.debug { "Using animation thumbnail: $thumbPath" }
+                            thumbnail(InputFile(thumbnailFile))
+                        }
+                    }
+                }
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendAnimation)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to send animation" }
+            false
+        }
+    }
+    
+    // Document sending methods
+    private suspend fun tryMarkdownDocument(chatId: String, document: InputFile, content: String?, attachment: MediaAttachment): Boolean {
+        if (content.isNullOrBlank()) return false
+        
+        return try {
+            val sendDocument = SendDocument.builder()
+                .chatId(chatId)
+                .document(document)
+                .caption(content)
+                .parseMode("MarkdownV2")
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendDocument)
+                }
+            }
+            true
+        } catch (e: TelegramApiException) {
+            if (isFormattingError(e)) false else throw e
+        }
+    }
+    
+    private suspend fun sendPlainDocument(chatId: String, document: InputFile, content: String?, attachment: MediaAttachment): Boolean {
+        return try {
+            val sendDocument = SendDocument.builder()
+                .chatId(chatId)
+                .document(document)
+                .apply { if (!content.isNullOrBlank()) caption(content) }
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendDocument)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to send document" }
+            false
+        }
+    }
+    
+    // Audio sending methods with metadata support
+    private suspend fun tryMarkdownAudio(chatId: String, audio: InputFile, content: String?, attachment: MediaAttachment): Boolean {
+        if (content.isNullOrBlank()) return false
+        
+        return try {
+            val sendAudio = SendAudio.builder()
+                .chatId(chatId)
+                .audio(audio)
+                .caption(content)
+                .parseMode("MarkdownV2")
+                .apply { 
+                    attachment.duration?.let { duration(it) }
+                    // Add original metadata from TDLib for proper music display
+                    attachment.performer?.let { performer(it) }
+                    attachment.title?.let { title(it) }
+                }
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendAudio)
+                }
+            }
+            true
+        } catch (e: TelegramApiException) {
+            if (isFormattingError(e)) false else throw e
+        }
+    }
+    
+    private suspend fun sendPlainAudio(chatId: String, audio: InputFile, content: String?, attachment: MediaAttachment): Boolean {
+        return try {
+            val sendAudio = SendAudio.builder()
+                .chatId(chatId)
+                .audio(audio)
+                .apply { 
+                    if (!content.isNullOrBlank()) caption(content)
+                    attachment.duration?.let { duration(it) }
+                    // Add original metadata from TDLib for proper music display
+                    attachment.performer?.let { performer(it) }
+                    attachment.title?.let { title(it) }
+                }
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendAudio)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to send audio" }
+            false
+        }
+    }
+    
+    // Voice sending methods
+    private suspend fun tryMarkdownVoice(chatId: String, voice: InputFile, content: String?, attachment: MediaAttachment): Boolean {
+        if (content.isNullOrBlank()) return false
+        
+        return try {
+            val sendVoice = SendVoice.builder()
+                .chatId(chatId)
+                .voice(voice)
+                .caption(content)
+                .parseMode("MarkdownV2")
+                .apply { attachment.duration?.let { duration(it) } }
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendVoice)
+                }
+            }
+            true
+        } catch (e: TelegramApiException) {
+            if (isFormattingError(e)) false else throw e
+        }
+    }
+    
+    private suspend fun sendPlainVoice(chatId: String, voice: InputFile, content: String?, attachment: MediaAttachment): Boolean {
+        return try {
+            val sendVoice = SendVoice.builder()
+                .chatId(chatId)
+                .voice(voice)
+                .apply { 
+                    if (!content.isNullOrBlank()) caption(content)
+                    attachment.duration?.let { duration(it) }
+                }
+                .build()
+            
+            withTimeout(uploadTimeoutMs) {
+                withContext(Dispatchers.IO) {
+                    telegramClient.execute(sendVoice)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to send voice" }
+            false
+        }
+    }
+    
+    /**
+     * Send text-only notification (fallback or no media)
+     */
+    private suspend fun sendTextNotification(
+        notification: NotificationMessage,
+        language: String
+    ): Boolean {
+        val chatId = notification.userId.toString()
+        val (markdownContent, plainContent) = buildSimpleMessage(notification, language)
+        
+        // Try MarkdownV2 first, then fallback to plain text
+        return tryMarkdownV2(chatId, markdownContent) ||
+               sendPlainText(chatId, plainContent)
     }
     
     /**
      * Build simple message with proper MarkdownV2 link handling
      */
     private fun buildSimpleMessage(notification: NotificationMessage, language: String): Pair<String, String> {
-        val channelName = notification.channelName ?: "Channel"
+        val channelName = notification.channelName
         val originalContent = notification.formattedMessageText ?: notification.messageText
-        
-        // Build MarkdownV2 version
         val markdownParts = mutableListOf<String>()
         
         // Build header with clickable channel link
@@ -148,14 +1150,12 @@ class NotificationProcessor(
             }
             
             // For MarkdownV2 links, properly escape only the content inside the link text
-            // Do NOT escape [ and ] as they are part of the link syntax [text](url)
             val safeLinkText = linkDisplayText
                 .replace("\\", "\\\\")  // Escape backslashes first
                 .replace("_", "\\_")    // Escape underscores (could start italic)
                 .replace("*", "\\*")    // Escape asterisks (could start bold)
                 .replace("`", "\\`")    // Escape backticks (could start code)
                 .replace("~", "\\~")    // Escape tildes (could start strikethrough)
-                // Note: [ and ] are NOT escaped here because they're part of link syntax
             
             val escapedUrl = TelegramMarkdownConverter.escapeUrlInLink(notification.messageLink)
             val markdownLink = "[$safeLinkText]($escapedUrl)"
@@ -172,11 +1172,7 @@ class NotificationProcessor(
             
             markdownParts.add(finalHeader)
             
-            logger.debug { "Raw template: $rawTemplate" }
-            logger.debug { "Template with placeholder: $templateWithPlaceholder" }
-            logger.debug { "Escaped template: $escapedTemplate" }
             logger.debug { "Created MarkdownV2 link: $markdownLink" }
-            logger.debug { "Final header: $finalHeader" }
         } else {
             // No link available, use plain header
             val header = Localization.getMessage(language, "notification.job.match.header", channelName)
@@ -224,7 +1220,7 @@ class NotificationProcessor(
                 .linkPreviewOptions(LinkPreviewOptions.builder().isDisabled(true).build())
                 .build()
             
-            withTimeout(3000) {
+            withTimeout(5000) {
                 withContext(Dispatchers.IO) {
                     telegramClient.execute(markdownMessage)
                 }
@@ -303,7 +1299,39 @@ class NotificationProcessor(
     }
     
     /**
-     * Simple statistics logging
+     * Start media cache cleanup - removes old cached media groups (cache references only, not files)
+     */
+    private fun startMediaCacheCleanup() {
+        scope.launch {
+            while (isActive) {
+                delay(300000) // Every 5 minutes
+                
+                try {
+                    val currentTime = System.currentTimeMillis()
+                    val expiredKeys = mediaCache.entries
+                        .filter { (_, group) -> currentTime - group.createdTime > 600000 } // 10 minutes old
+                        .map { it.key }
+                    
+                    expiredKeys.forEach { key ->
+                        val removedGroup = mediaCache.remove(key)
+                        if (removedGroup != null) {
+                            logger.debug { "Expired media cache entry: ${key.take(8)}..." }
+                        }
+                    }
+                    
+                    if (expiredKeys.isNotEmpty()) {
+                        logger.debug { "Cleaned up ${expiredKeys.size} expired media cache entries" }
+                    }
+                    
+                } catch (e: Exception) {
+                    logger.warn(e) { "Error during media cache cleanup" }
+                }
+            }
+        }
+    }
+    
+    /**
+     * Enhanced statistics logging with media reuse tracking
      */
     private fun startPeriodicStatsLogging() {
         scope.launch {
@@ -312,9 +1340,12 @@ class NotificationProcessor(
                 
                 if (totalNotifications > 0) {
                     val successRate = (markdownSuccess.toDouble() / totalNotifications * 100).toInt()
+                    val mediaRate = if (totalNotifications > 0) (mediaNotifications.toDouble() / totalNotifications * 100).toInt() else 0
+                    
                     logger.debug { 
-                        "📊 Notification stats: $successRate% MarkdownV2 success " +
-                        "($markdownSuccess formatted, $plainFallback plain, $totalNotifications total)"
+                        "📊 Notification stats: $successRate% MarkdownV2 success, $mediaRate% with media " +
+                        "($markdownSuccess formatted, $plainFallback plain, $mediaNotifications media, " +
+                        "$mediaReusedCount reused, $totalNotifications total, cache: ${mediaCache.size})"
                     }
                 }
             }
@@ -328,7 +1359,12 @@ class NotificationProcessor(
             "total" to totalNotifications,
             "markdownSuccess" to markdownSuccess,
             "plainFallback" to plainFallback,
-            "successRate" to if (totalNotifications > 0) (markdownSuccess * 100 / totalNotifications) else 0
+            "mediaNotifications" to mediaNotifications,
+            "mediaReused" to mediaReusedCount,
+            "mediaCacheSize" to mediaCache.size,
+            "successRate" to if (totalNotifications > 0) (markdownSuccess * 100 / totalNotifications) else 0,
+            "mediaRate" to if (totalNotifications > 0) (mediaNotifications * 100 / totalNotifications) else 0,
+            "uploadTimeoutSeconds" to config.mediaUploadTimeoutSeconds
         )
     }
     
@@ -337,10 +1373,23 @@ class NotificationProcessor(
         
         if (totalNotifications > 0) {
             val successRate = (markdownSuccess.toDouble() / totalNotifications * 100).toInt()
+            val mediaRate = if (totalNotifications > 0) (mediaNotifications.toDouble() / totalNotifications * 100).toInt() else 0
+            
             logger.debug { 
-                "📊 Final stats: $successRate% MarkdownV2 success " +
-                "($markdownSuccess formatted, $plainFallback plain, $totalNotifications total)"
+                "📊 Final stats: $successRate% MarkdownV2 success, $mediaRate% with media " +
+                "($markdownSuccess formatted, $plainFallback plain, $mediaNotifications media, " +
+                "$mediaReusedCount reused, $totalNotifications total)"
             }
+        }
+        
+        // Clear cache references (no file cleanup needed - TDLib manages files)
+        mediaCache.clear()
+        
+        val remainingNotifications = mutableListOf<NotificationMessage>()
+        notificationQueue.drainTo(remainingNotifications)
+        
+        if (remainingNotifications.isNotEmpty()) {
+            logger.info { "Cleared ${remainingNotifications.size} queued notifications during shutdown" }
         }
         
         scope.cancel()

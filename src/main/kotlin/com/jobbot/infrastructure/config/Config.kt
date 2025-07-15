@@ -20,13 +20,20 @@ object Config {
             apiId = getEnv("API_ID")?.toIntOrNull(),
             apiHash = getEnv("API_HASH"),
             phoneNumber = getEnv("PHONE_NUMBER"),
-            authorizedAdminIds = parseAdminIds(), // 🔧 CHANGED: Parse multiple admin IDs
+            authorizedAdminIds = parseAdminIds(),
             databasePath = getEnv("DATABASE_PATH") ?: "./data/bot.db",
             logPath = getEnv("LOG_PATH") ?: "./logs",
             logLevel = getEnv("LOG_LEVEL") ?: "INFO",
             tdlibLogLevel = getEnv("TDLIB_LOG_LEVEL") ?: "ERROR",
             rateLimitMessagesPerMinute = getEnv("RATE_LIMIT_MESSAGES_PER_MINUTE")?.toIntOrNull() ?: 60,
-            rateLimitBurstSize = getEnv("RATE_LIMIT_BURST_SIZE")?.toIntOrNull() ?: 10
+            rateLimitBurstSize = getEnv("RATE_LIMIT_BURST_SIZE")?.toIntOrNull() ?: 10,
+            mediaUploadTimeoutSeconds = getEnv("MEDIA_UPLOAD_TIMEOUT_SECONDS")?.toIntOrNull() ?: 300,
+            // NEW: TDLib storage configuration
+            tdlibMaxStorageGB = getEnv("TDLIB_MAX_STORAGE_GB")?.toIntOrNull() ?: 2,
+            tdlibFileTtlDays = getEnv("TDLIB_FILE_TTL_DAYS")?.toIntOrNull() ?: 7,
+            tdlibMaxFileCount = getEnv("TDLIB_MAX_FILE_COUNT")?.toIntOrNull() ?: 5000,
+            tdlibCleanupIntervalHours = getEnv("TDLIB_CLEANUP_INTERVAL_HOURS")?.toIntOrNull() ?: 24,
+            tdlibClearCacheOnStart = getEnv("TDLIB_CLEAR_CACHE_ON_START")?.toBoolean() ?: false
         )
     }
     
@@ -104,6 +111,48 @@ object Config {
                 logger.warn { "RATE_LIMIT_BURST_SIZE ($rateLimitBurstSize) is larger than RATE_LIMIT_MESSAGES_PER_MINUTE ($rateLimitMessagesPerMinute)" }
             }
             
+            // Validate media upload timeout
+            if (mediaUploadTimeoutSeconds <= 0) {
+                throw IllegalStateException("MEDIA_UPLOAD_TIMEOUT_SECONDS must be positive")
+            }
+            
+            if (mediaUploadTimeoutSeconds < 30) {
+                logger.warn { "MEDIA_UPLOAD_TIMEOUT_SECONDS ($mediaUploadTimeoutSeconds) is very short, may cause upload failures" }
+            }
+            
+            if (mediaUploadTimeoutSeconds > 600) {
+                logger.warn { "MEDIA_UPLOAD_TIMEOUT_SECONDS ($mediaUploadTimeoutSeconds) is very long (>10 minutes)" }
+            }
+            
+            // Validate TDLib storage settings
+            if (tdlibMaxStorageGB <= 0) {
+                throw IllegalStateException("TDLIB_MAX_STORAGE_GB must be positive")
+            }
+            
+            if (tdlibMaxStorageGB > 50) {
+                logger.warn { "TDLIB_MAX_STORAGE_GB ($tdlibMaxStorageGB) is very large (>50GB)" }
+            }
+            
+            if (tdlibFileTtlDays <= 0) {
+                throw IllegalStateException("TDLIB_FILE_TTL_DAYS must be positive")
+            }
+            
+            if (tdlibFileTtlDays < 1) {
+                logger.warn { "TDLIB_FILE_TTL_DAYS ($tdlibFileTtlDays) is very short, may delete recent files" }
+            }
+            
+            if (tdlibMaxFileCount <= 0) {
+                throw IllegalStateException("TDLIB_MAX_FILE_COUNT must be positive")
+            }
+            
+            if (tdlibCleanupIntervalHours <= 0) {
+                throw IllegalStateException("TDLIB_CLEANUP_INTERVAL_HOURS must be positive")
+            }
+            
+            if (tdlibCleanupIntervalHours < 1) {
+                logger.warn { "TDLIB_CLEANUP_INTERVAL_HOURS ($tdlibCleanupIntervalHours) is very frequent" }
+            }
+            
             // Validate TDLib log level
             if (!ValidationUtils.isValidTdlibLogLevel(tdlibLogLevel)) {
                 logger.warn { "Invalid TDLIB_LOG_LEVEL ($tdlibLogLevel), falling back to ERROR" }
@@ -132,6 +181,8 @@ object Config {
             logger.info { "System log level: $logLevel" }
             logger.info { "TDLib log level: $tdlibLogLevel" }
             logger.info { "Rate limit: $rateLimitMessagesPerMinute messages/minute (burst: $rateLimitBurstSize)" }
+            logger.info { "Media upload timeout: $mediaUploadTimeoutSeconds seconds" }
+            logger.info { "TDLib storage: max ${tdlibMaxStorageGB}GB, TTL ${tdlibFileTtlDays} days, cleanup every ${tdlibCleanupIntervalHours}h" }
             
             // Warn if rate limits seem too restrictive for interactive use
             if (rateLimitMessagesPerMinute < 30) {

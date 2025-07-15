@@ -5,6 +5,8 @@ import com.jobbot.core.MessageProcessor
 import com.jobbot.data.Database
 import com.jobbot.data.models.ChannelMessage
 import com.jobbot.data.models.ChannelDetails
+import com.jobbot.data.models.MediaAttachment
+import com.jobbot.data.models.MediaType
 import com.jobbot.infrastructure.monitoring.ErrorTracker
 import com.jobbot.shared.getLogger
 import com.jobbot.shared.utils.TelegramMarkdownConverter
@@ -14,8 +16,8 @@ import org.drinkless.tdlib.TdApi
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Handles TDLib message monitoring and processing with CONSISTENT MarkdownV2 formatting support
- * FIXED: Unified entity processing for both channels and groups
+ * Handles TDLib message monitoring and processing with MEDIA GROUP support
+ * ENHANCED: Properly handles media groups (multiple media files with single caption)
  */
 class ChannelMonitor(
     private val database: Database,
@@ -25,10 +27,35 @@ class ChannelMonitor(
     private val logger = getLogger("ChannelMonitor")
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     
+    // ADDED: Media downloader for handling attachments
+    private val mediaDownloader = MediaDownloader()
+    
+    // ADDED: Media group handling
+    private val mediaGroups = ConcurrentHashMap<Long, MediaGroupCollector>()
+    
+    // Data class for collecting media group messages
+    private data class MediaGroupCollector(
+        val mediaGroupId: Long,
+        val messages: MutableList<TdApi.Message> = mutableListOf(),
+        val createdTime: Long = System.currentTimeMillis(),
+        var hasTextMessage: Boolean = false
+    )
+    
     // Bounded cache with automatic cleanup
     private val channelIdCache = object : LinkedHashMap<String, Long>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean {
             return size > 500 // Keep max 500 entries
+        }
+    }
+    
+    init {
+        // Start periodic cleanup of old temp files and media groups
+        scope.launch {
+            while (isActive) {
+                delay(3600000) // Every hour
+                mediaDownloader.cleanupOldTempFiles()
+                cleanupOldMediaGroups()
+            }
         }
     }
     
@@ -62,59 +89,9 @@ class ChannelMonitor(
                 
                 logger.info { "Processing message from monitored chat: $channelId (type: ${if (isChannelPost) "channel" else "group"})" }
                 
-                // 🔧 FIXED: Use consistent entity processing for both channels and groups
-                val (plainText, formattedText) = extractMessageContent(message.content)
-                
-                if (plainText.isBlank()) {
-                    logger.debug { "Message has no text content, skipping" }
-                    return
-                }
-                
-                logger.debug { "Processing plain text: '$plainText'" }
-                if (formattedText != plainText) {
-                    logger.debug { "Generated formatted text with ${formattedText.length - plainText.length} additional markup characters" }
-                }
-                
+                // ENHANCED: Handle media groups properly
                 scope.launch {
-                    try {
-                        // Get channel details
-                        val channelDetails = database.getAllChannelsWithDetails().find { it.channelId == channelId }
-                        val displayName = when {
-                            !channelDetails?.channelTag.isNullOrBlank() -> channelDetails!!.channelTag!!
-                            !channelDetails?.channelName.isNullOrBlank() -> channelDetails!!.channelName!!
-                            else -> if (isChannelPost) "Channel" else "Group"
-                        }
-                        
-                        // Generate message link (for both channels and groups)
-                        val messageLink = generateMessageLink(channelDetails, message.id)
-                        
-                        // Create ChannelMessage with simplified data
-                        val channelMessage = ChannelMessage(
-                            channelId = channelId,
-                            channelName = displayName,
-                            messageId = message.id,
-                            text = plainText, // For keyword matching
-                            formattedText = formattedText, // For user notifications
-                            senderUsername = null, // Not needed anymore
-                            messageLink = messageLink
-                        )
-                        
-                        logger.debug { "Calling messageProcessor.processChannelMessage..." }
-                        val notifications = messageProcessor.processChannelMessage(channelMessage)
-                        
-                        logger.info { "Message processing complete. Generated ${notifications.size} notifications" }
-                        
-                        // Queue notifications
-                        for (notification in notifications) {
-                            logger.debug { "Queueing notification for user ${notification.userId}" }
-                            bot?.queueNotification(notification)
-                        }
-                        
-                        logger.debug { "Processed message from monitored chat $channelId, generated ${notifications.size} notifications" }
-                    } catch (e: Exception) {
-                        logger.error(e) { "Error processing new message" }
-                        ErrorTracker.logError("ERROR", "Message processing error: ${e.message}", e)
-                    }
+                    handleMessageWithMediaGroup(message, channelId, client)
                 }
             } else {
                 logger.debug { "Ignoring message from unmonitored chat $chatId (isChannelPost: $isChannelPost)" }
@@ -126,57 +103,628 @@ class ChannelMonitor(
     }
     
     /**
-     * 🔧 FIXED: Unified entity processing for both channels and groups
-     * Extract both plain text and formatted text from message content
-     * Returns Pair<plainText, formattedText>
+     * Handle message with proper media group support
+     * ENHANCED: Collects media group messages and processes them together
      */
+    private suspend fun handleMessageWithMediaGroup(
+        message: TdApi.Message,
+        channelId: String,
+        client: Client?
+    ) {
+        try {
+            // Check if this message is part of a media group
+            val mediaGroupId = message.mediaAlbumId
+            
+            if (mediaGroupId != 0L) {
+                // This is part of a media group
+                logger.debug { "Message ${message.id} is part of media group $mediaGroupId" }
+                
+                val collector = mediaGroups.getOrPut(mediaGroupId) {
+                    MediaGroupCollector(mediaGroupId)
+                }
+                
+                synchronized(collector) {
+                    collector.messages.add(message)
+                    
+                    // Check if this message has text content
+                    val (plainText, _) = extractMessageContent(message.content)
+                    if (plainText.isNotBlank()) {
+                        collector.hasTextMessage = true
+                        logger.debug { "Media group $mediaGroupId now has text content" }
+                    }
+                }
+                
+                // Wait a bit for other messages in the group, then process
+                delay(1000) // Wait 1 second for all media group messages
+                
+                // Check if we should process this media group now
+                val shouldProcess = synchronized(collector) {
+                    // Process if we have text content OR if enough time has passed
+                    collector.hasTextMessage || 
+                    (System.currentTimeMillis() - collector.createdTime > 3000) // 3 second timeout
+                }
+                
+                if (shouldProcess) {
+                    val removedCollector = mediaGroups.remove(mediaGroupId)
+                    if (removedCollector != null) {
+                        logger.debug { "Processing media group $mediaGroupId with ${removedCollector.messages.size} messages" }
+                        processMediaGroup(removedCollector.messages, channelId, client)
+                    }
+                }
+                
+            } else {
+                // Single message (not part of a media group)
+                logger.debug { "Processing single message ${message.id}" }
+                processMessageWithMedia(message, channelId, client)
+            }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error handling message with media group" }
+            ErrorTracker.logError("ERROR", "Media group handler error: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * Process a complete media group (multiple media files + caption)
+     */
+    private suspend fun processMediaGroup(
+        messages: List<TdApi.Message>,
+        channelId: String,
+        client: Client?
+    ) {
+        try {
+            logger.debug { "Processing media group with ${messages.size} messages" }
+            
+            // Find the message with text content (usually the last one)
+            val textMessage = messages.find { message ->
+                val (plainText, _) = extractMessageContent(message.content)
+                plainText.isNotBlank()
+            }
+            
+            // Collect all media attachments from all messages
+            val allMediaAttachments = mutableListOf<MediaAttachment>()
+            
+            for (message in messages) {
+                val mediaAttachments = mediaDownloader.downloadMessageMedia(message, client)
+                allMediaAttachments.addAll(mediaAttachments)
+                
+                if (mediaAttachments.isNotEmpty()) {
+                    logger.debug { "Downloaded ${mediaAttachments.size} attachments from message ${message.id}" }
+                }
+            }
+            
+            logger.info { "Media group processing: ${allMediaAttachments.size} total attachments from ${messages.size} messages" }
+            
+            // Use text from the text message, or generate generic text
+            val (plainText, formattedText) = if (textMessage != null) {
+                extractMessageContent(textMessage.content)
+            } else {
+                // Generate generic text based on media types
+                val mediaTypes = allMediaAttachments.map { it.type.name.lowercase() }.distinct()
+                val genericText = "media post ${mediaTypes.joinToString(" ")}"
+                Pair(genericText, genericText)
+            }
+            
+            // Get channel details
+            val channelDetails = database.getAllChannelsWithDetails().find { it.channelId == channelId }
+            val displayName = when {
+                !channelDetails?.channelTag.isNullOrBlank() -> channelDetails!!.channelTag!!
+                !channelDetails?.channelName.isNullOrBlank() -> channelDetails!!.channelName!!
+                else -> "Channel"
+            }
+            
+            // Use the last message for link generation (usually has the text)
+            val linkMessage = textMessage ?: messages.last()
+            val messageLink = generateMessageLink(channelDetails, linkMessage.id)
+            
+            // Create a single ChannelMessage with all media attachments
+            val channelMessage = ChannelMessage(
+                channelId = channelId,
+                channelName = displayName,
+                messageId = linkMessage.id,
+                text = plainText,
+                formattedText = if (textMessage != null) formattedText else null,
+                senderUsername = null,
+                messageLink = messageLink,
+                mediaAttachments = allMediaAttachments
+            )
+            
+            logger.debug { "Processing media group as single message with ${allMediaAttachments.size} attachments" }
+            val notifications = messageProcessor.processChannelMessage(channelMessage)
+            
+            logger.info { "Media group processing complete. Generated ${notifications.size} notifications with ${allMediaAttachments.size} attachments each" }
+            
+            // Queue notifications as a batch for media reuse
+            if (notifications.isNotEmpty()) {
+                bot?.queueNotifications(notifications)
+            }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error processing media group" }
+            ErrorTracker.logError("ERROR", "Media group processing error: ${e.message}", e)
+        }
+    }
+
+    /**
+    * Process single message with media downloads
+    * ENHANCED: Better handling of various message types including polls
+    */
+    private suspend fun processMessageWithMedia(
+        message: TdApi.Message,
+        channelId: String,
+        client: Client?
+    ) {
+        try {
+            // Extract text content
+            val (plainText, formattedText) = extractMessageContent(message.content)
+            
+            // Download media attachments
+            logger.debug { "Downloading media attachments for message ${message.id}" }
+            val mediaAttachments = mediaDownloader.downloadMessageMedia(message, client)
+            
+            // ENHANCED: More intelligent content checking
+            val hasUsefulText = plainText.isNotBlank() && plainText.length >= 3 // At least 3 characters
+            val hasMedia = mediaAttachments.isNotEmpty()
+            
+            // Skip only if absolutely no useful content
+            if (!hasUsefulText && !hasMedia) {
+                logger.debug { "Message has no useful content (text: '${plainText.take(50)}', media: ${mediaAttachments.size}), skipping" }
+                return
+            }
+            
+            // For media-only messages, generate searchable keywords
+            val finalPlainText = if (!hasUsefulText && hasMedia) {
+                generateMediaKeywords(mediaAttachments, message.content)
+            } else {
+                plainText
+            }
+            
+            logger.debug { "Processing message: text='${finalPlainText.take(50)}${if (finalPlainText.length > 50) "..." else ""}', media=${mediaAttachments.size}" }
+            
+            if (mediaAttachments.isNotEmpty()) {
+                logger.info { "Downloaded ${mediaAttachments.size} media attachments for message ${message.id}" }
+                mediaAttachments.forEach { attachment ->
+                    logger.debug { 
+                        "Downloaded ${attachment.type}: ${attachment.originalFileName} " +
+                        "(${attachment.fileSize / 1024}KB) -> ${attachment.filePath}" 
+                    }
+                }
+            }
+            
+            // Get channel details
+            val channelDetails = database.getAllChannelsWithDetails().find { it.channelId == channelId }
+            val displayName = when {
+                !channelDetails?.channelTag.isNullOrBlank() -> channelDetails!!.channelTag!!
+                !channelDetails?.channelName.isNullOrBlank() -> channelDetails!!.channelName!!
+                else -> "Channel"
+            }
+            
+            val messageLink = generateMessageLink(channelDetails, message.id)
+            
+            val channelMessage = ChannelMessage(
+                channelId = channelId,
+                channelName = displayName,
+                messageId = message.id,
+                text = finalPlainText,
+                formattedText = if (hasUsefulText) formattedText else null,
+                senderUsername = null,
+                messageLink = messageLink,
+                mediaAttachments = mediaAttachments
+            )
+            
+            logger.debug { "Processing single message..." }
+            val notifications = messageProcessor.processChannelMessage(channelMessage)
+            
+            logger.info { "Single message processing complete. Generated ${notifications.size} notifications" }
+            
+            if (notifications.isNotEmpty()) {
+                bot?.queueNotifications(notifications)
+            }
+            
+        } catch (e: Exception) {
+            logger.error(e) { "Error processing single message with media" }
+            ErrorTracker.logError("ERROR", "Single message processing error: ${e.message}", e)
+        }
+    }
+
+    /**
+    * Generate searchable keywords for media-only messages
+    * This helps with job matching even when there's no text
+    */
+    private fun generateMediaKeywords(
+        mediaAttachments: List<MediaAttachment>,
+        messageContent: TdApi.MessageContent
+    ): String {
+        val keywords = mutableListOf<String>()
+        
+        // Add media type keywords
+        val mediaTypes = mediaAttachments.map { it.type }.distinct()
+        mediaTypes.forEach { type ->
+            when (type) {
+                MediaType.PHOTO -> keywords.addAll(listOf("photo", "image", "picture", "screenshot"))
+                MediaType.VIDEO -> keywords.addAll(listOf("video", "clip", "recording", "demo"))
+                MediaType.DOCUMENT -> keywords.addAll(listOf("document", "file", "attachment", "pdf"))
+                MediaType.AUDIO -> keywords.addAll(listOf("audio", "sound", "music", "recording"))
+                MediaType.VOICE -> keywords.addAll(listOf("voice", "message", "audio", "recording"))
+                MediaType.ANIMATION -> keywords.addAll(listOf("gif", "animation", "video", "clip"))
+            }
+        }
+        
+        // Add content-specific keywords using safe reflection
+        when {
+            messageContent.javaClass.simpleName.contains("Poll") -> {
+                keywords.addAll(listOf("poll", "vote", "survey", "question"))
+                // Try to extract poll question text safely
+                try {
+                    val pollField = messageContent.javaClass.declaredFields.find { it.name == "poll" }
+                    if (pollField != null) {
+                        pollField.isAccessible = true
+                        val poll = pollField.get(messageContent)
+                        val questionField = poll?.javaClass?.declaredFields?.find { it.name == "question" }
+                        if (questionField != null) {
+                            questionField.isAccessible = true
+                            val question = questionField.get(poll)
+                            val textField = question?.javaClass?.declaredFields?.find { it.name == "text" }
+                            if (textField != null) {
+                                textField.isAccessible = true
+                                val questionText = textField.get(question) as? String
+                                if (questionText?.lowercase()?.contains("job") == true || 
+                                    questionText?.lowercase()?.contains("work") == true || 
+                                    questionText?.lowercase()?.contains("hire") == true) {
+                                    keywords.addAll(listOf("job", "hiring", "employment", "work"))
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    logger.debug { "Could not extract poll text: ${e.message}" }
+                }
+            }
+            messageContent.javaClass.simpleName.contains("Sticker") -> {
+                keywords.addAll(listOf("sticker", "emoji", "reaction"))
+            }
+            messageContent.javaClass.simpleName.contains("Location") -> {
+                keywords.addAll(listOf("location", "address", "place", "map"))
+            }
+            messageContent.javaClass.simpleName.contains("Venue") -> {
+                keywords.addAll(listOf("venue", "place", "location", "address"))
+            }
+            messageContent.javaClass.simpleName.contains("Contact") -> {
+                keywords.addAll(listOf("contact", "phone", "person", "info"))
+            }
+        }
+        
+        // Add filename-based keywords (useful for job-related documents)
+        mediaAttachments.forEach { attachment ->
+            attachment.originalFileName?.let { filename ->
+                val nameParts = filename.lowercase()
+                    .replace(Regex("[^a-z0-9\\s]"), " ")
+                    .split("\\s+".toRegex())
+                    .filter { it.length > 2 } // Only words longer than 2 chars
+                
+                keywords.addAll(nameParts)
+            }
+        }
+        
+        val result = keywords.distinct().joinToString(" ")
+        logger.debug { "Generated media keywords: '$result'" }
+        
+        return result
+    }
+    
+    /**
+     * Clean up old media groups that might have been orphaned
+     */
+    private fun cleanupOldMediaGroups() {
+        try {
+            val currentTime = System.currentTimeMillis()
+            val expiredGroups = mediaGroups.entries
+                .filter { (_, collector) -> currentTime - collector.createdTime > 300000 } // 5 minutes old
+                .map { it.key }
+            
+            expiredGroups.forEach { groupId ->
+                mediaGroups.remove(groupId)
+                logger.debug { "Cleaned up expired media group: $groupId" }
+            }
+            
+            if (expiredGroups.isNotEmpty()) {
+                logger.debug { "Cleaned up ${expiredGroups.size} expired media groups" }
+            }
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Error during media group cleanup" }
+        }
+    }
+    
+    /**
+    * Extract both plain text and formatted text from message content
+    * ENHANCED: Now handles polls, stickers, and other message types for better job matching
+    */
     private fun extractMessageContent(content: TdApi.MessageContent): Pair<String, String> {
         return when (content) {
             is TdApi.MessageText -> {
                 val plainText = content.text.text
                 val formattedText = convertFormattedTextToMarkdown(content.text)
                 logger.debug { "Text message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
-                
-                // 🔧 FIXED: Unified logging for both channels and groups
-                if (content.text.entities.isNotEmpty()) {
-                    logger.debug { "Message entities: ${content.text.entities.size} entities found" }
-                    content.text.entities.forEach { entity ->
-                        logger.debug { "Entity: ${entity.type.javaClass.simpleName} at ${entity.offset}-${entity.offset + entity.length}" }
-                    }
-                } else {
-                    logger.debug { "Message has no entities" }
-                }
-                
                 Pair(plainText, formattedText)
             }
+            
             is TdApi.MessagePhoto -> {
                 val plainText = content.caption?.text ?: ""
                 val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
                 logger.debug { "Photo message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
+            
             is TdApi.MessageVideo -> {
                 val plainText = content.caption?.text ?: ""
                 val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
                 logger.debug { "Video message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
+            
             is TdApi.MessageDocument -> {
                 val plainText = content.caption?.text ?: ""
                 val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
                 logger.debug { "Document message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
                 Pair(plainText, formattedText)
             }
+            
+            is TdApi.MessageAudio -> {
+                val plainText = content.caption?.text ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                logger.debug { "Audio message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
+                Pair(plainText, formattedText)
+            }
+            
+            is TdApi.MessageAnimation -> {
+                val plainText = content.caption?.text ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                logger.debug { "Animation message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
+                Pair(plainText, formattedText)
+            }
+            
+            is TdApi.MessageVoiceNote -> {
+                val plainText = content.caption?.text ?: ""
+                val formattedText = content.caption?.let { convertFormattedTextToMarkdown(it) } ?: ""
+                logger.debug { "Voice note message - plain: ${plainText.length} chars, formatted: ${formattedText.length} chars" }
+                Pair(plainText, formattedText)
+            }
+            
+            // ENHANCED: Handle polls for job-related content using safe reflection
+            is TdApi.MessagePoll -> {
+                try {
+                    val poll = content.poll
+                    val question = poll.question.text
+                    val options = poll.options.joinToString(" ") { it.text.text }
+                    val plainText = "$question $options"
+                    val formattedText = "*${TelegramMarkdownConverter.escapeForFormatting(question)}*\n\n${TelegramMarkdownConverter.escapeMarkdownV2(options)}"
+                    logger.debug { "Poll message - question: '${question.take(50)}', ${poll.options.size} options" }
+                    Pair(plainText, formattedText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing poll message: ${e.message}" }
+                    Pair("poll message", "poll message")
+                }
+            }
+            
+            // ENHANCED: Handle stickers (some have associated text/emoji)
+            is TdApi.MessageSticker -> {
+                try {
+                    val sticker = content.sticker
+                    val emoji = sticker.emoji
+                    val stickerText = if (!emoji.isNullOrBlank()) {
+                        "sticker $emoji"
+                    } else {
+                        "sticker"
+                    }
+                    logger.debug { "Sticker message - emoji: '$emoji'" }
+                    Pair(stickerText, stickerText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing sticker message: ${e.message}" }
+                    Pair("sticker", "sticker")
+                }
+            }
+            
+            // ENHANCED: Handle location messages (could be job-related)
+            is TdApi.MessageLocation -> {
+                try {
+                    val location = content.location
+                    val locationText = "location ${location.latitude} ${location.longitude}"
+                    logger.debug { "Location message" }
+                    Pair(locationText, locationText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing location message: ${e.message}" }
+                    Pair("location", "location")
+                }
+            }
+            
+            // ENHANCED: Handle venue messages (could be job-related)
+            is TdApi.MessageVenue -> {
+                try {
+                    val venue = content.venue
+                    val venueText = "${venue.title} ${venue.address}"
+                    logger.debug { "Venue message - title: '${venue.title}'" }
+                    Pair(venueText, venueText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing venue message: ${e.message}" }
+                    Pair("venue", "venue")
+                }
+            }
+            
+            // ENHANCED: Handle contact messages
+            is TdApi.MessageContact -> {
+                try {
+                    val contact = content.contact
+                    val contactText = "${contact.firstName} ${contact.lastName} ${contact.phoneNumber}"
+                    logger.debug { "Contact message - name: '${contact.firstName} ${contact.lastName}'" }
+                    Pair(contactText, contactText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing contact message: ${e.message}" }
+                    Pair("contact", "contact")
+                }
+            }
+            
+            // ENHANCED: Handle dice/game messages (usually not job-related, but worth logging)
+            is TdApi.MessageDice -> {
+                try {
+                    val emoji = content.emoji
+                    val diceText = "dice $emoji"
+                    logger.debug { "Dice message - emoji: '$emoji'" }
+                    Pair(diceText, diceText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing dice message: ${e.message}" }
+                    Pair("dice", "dice")
+                }
+            }
+            
+            // ENHANCED: Handle game messages
+            is TdApi.MessageGame -> {
+                try {
+                    val game = content.game
+                    val gameText = "${game.title} ${game.description}"
+                    logger.debug { "Game message - title: '${game.title}'" }
+                    Pair(gameText, gameText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing game message: ${e.message}" }
+                    Pair("game", "game")
+                }
+            }
+            
+            // ENHANCED: Service messages that might contain useful info
+            is TdApi.MessageChatAddMembers -> {
+                try {
+                    val memberNames = content.memberUserIds.joinToString(" ") { "user$it" }
+                    val serviceText = "new members joined $memberNames"
+                    logger.debug { "Chat add members - ${content.memberUserIds.size} members" }
+                    Pair(serviceText, serviceText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing add members message: ${e.message}" }
+                    Pair("new members", "new members")
+                }
+            }
+            
+            is TdApi.MessageChatJoinByLink -> {
+                val serviceText = "user joined via link"
+                logger.debug { "User joined by link" }
+                Pair(serviceText, serviceText)
+            }
+            
+            is TdApi.MessageChatDeleteMember -> {
+                val serviceText = "user left chat"
+                logger.debug { "User left chat" }
+                Pair(serviceText, serviceText)
+            }
+            
+            is TdApi.MessageChatChangeTitle -> {
+                try {
+                    val newTitle = content.title
+                    val serviceText = "chat title changed to $newTitle"
+                    logger.debug { "Chat title changed to: '$newTitle'" }
+                    Pair(serviceText, serviceText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing title change: ${e.message}" }
+                    Pair("title changed", "title changed")
+                }
+            }
+            
+            is TdApi.MessageChatChangePhoto -> {
+                val serviceText = "chat photo changed"
+                logger.debug { "Chat photo changed" }
+                Pair(serviceText, serviceText)
+            }
+            
+            is TdApi.MessageChatDeletePhoto -> {
+                val serviceText = "chat photo deleted"
+                logger.debug { "Chat photo deleted" }
+                Pair(serviceText, serviceText)
+            }
+            
+            // Handle animated emoji
+            is TdApi.MessageAnimatedEmoji -> {
+                try {
+                    val emoji = content.emoji
+                    val emojiText = "animated emoji $emoji"
+                    logger.debug { "Animated emoji: '$emoji'" }
+                    Pair(emojiText, emojiText)
+                } catch (e: Exception) {
+                    logger.debug { "Error processing animated emoji: ${e.message}" }
+                    Pair("emoji", "emoji")
+                }
+            }
+            
+            // Handle other message types with safe property access
             else -> {
-                logger.debug { "Unsupported message type: ${content.javaClass.simpleName}" }
-                Pair("", "")
+                // For unsupported message types, try to extract any available text
+                logger.debug { "Message type ${content.javaClass.simpleName} - checking for text content" }
+                
+                // Use reflection to safely check for common text properties
+                val textContent = try {
+                    when {
+                        content.javaClass.simpleName.contains("Invoice") -> {
+                            // Try to extract invoice text if available
+                            val titleField = content.javaClass.declaredFields.find { it.name == "title" }
+                            val descField = content.javaClass.declaredFields.find { it.name == "description" }
+                            val title = titleField?.let { 
+                                it.isAccessible = true
+                                it.get(content) as? String 
+                            } ?: ""
+                            val desc = descField?.let { 
+                                it.isAccessible = true
+                                it.get(content) as? String 
+                            } ?: ""
+                            "$title $desc".trim()
+                        }
+                        content.javaClass.simpleName.contains("WebPage") -> {
+                            // Try to extract web page text if available
+                            val titleField = content.javaClass.declaredFields.find { it.name == "title" }
+                            val title = titleField?.let { 
+                                it.isAccessible = true
+                                it.get(content) as? String 
+                            } ?: ""
+                            title
+                        }
+                        content.javaClass.simpleName.contains("ChannelChatCreate") || 
+                        content.javaClass.simpleName.contains("SupergroupChatCreate") -> {
+                            val titleField = content.javaClass.declaredFields.find { it.name == "title" }
+                            val title = titleField?.let { 
+                                it.isAccessible = true
+                                it.get(content) as? String 
+                            } ?: "unknown"
+                            val prefix = if (content.javaClass.simpleName.contains("Channel")) "channel" else "supergroup"
+                            "$prefix created $title"
+                        }
+                        else -> {
+                            // Try one last attempt to extract any text using reflection
+                            val textFields = content.javaClass.declaredFields.filter { field ->
+                                field.type == String::class.java && 
+                                (field.name.contains("text", true) || 
+                                 field.name.contains("title", true) ||
+                                 field.name.contains("description", true))
+                            }
+                            
+                            textFields.mapNotNull { field ->
+                                try {
+                                    field.isAccessible = true
+                                    field.get(content) as? String
+                                } catch (e: Exception) {
+                                    null
+                                }
+                            }.joinToString(" ").trim()
+                        }
+                    }
+                } catch (e: Exception) {
+                    logger.debug { "Could not extract text from ${content.javaClass.simpleName}: ${e.message}" }
+                    ""
+                }
+                
+                Pair(textContent, textContent)
             }
         }
     }
     
     /**
-     * 🔧 FIXED: Unified MarkdownV2 conversion for both channels and groups
-     * This method now works consistently for all message types
+     * Unified MarkdownV2 conversion for all message types
+     * UNCHANGED: This method remains the same
      */
     private fun convertFormattedTextToMarkdown(formattedText: TdApi.FormattedText): String {
         if (formattedText.entities.isEmpty()) {
@@ -201,7 +749,6 @@ class ChannelMonitor(
                 // Get the entity text
                 val entityText = text.substring(entity.offset, entity.offset + entity.length)
                 
-                // 🔧 FIXED: Unified entity handling for all message types
                 when (entity.type) {
                     is TdApi.TextEntityTypeBold -> {
                         result.append("*${TelegramMarkdownConverter.escapeForFormatting(entityText)}*")
@@ -311,7 +858,6 @@ class ChannelMonitor(
             
             val finalResult = result.toString()
             
-            // 🔧 FIXED: Consistent debug logging - removed validation check
             logger.debug { "Generated MarkdownV2 (${finalResult.length} chars): $finalResult" }
             
             return finalResult
