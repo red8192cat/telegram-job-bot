@@ -30,8 +30,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.*
 
 /**
- * UPDATED NotificationProcessor with video thumbnail support
- * Now correctly sends videos with thumbnails for proper previews
+ * FIXED NotificationProcessor with proper document media group support
+ * Now correctly sends multiple documents as ONE message instead of separate messages
  */
 class NotificationProcessor(
     private val database: Database,
@@ -241,7 +241,7 @@ class NotificationProcessor(
                 val attachment = notification.mediaAttachments.first()
                 return sendMediaAttachment(chatId, attachment, markdownContent, plainContent)
             } else {
-                // Multiple attachments - use proper media group
+                // Multiple attachments - use FIXED media group logic
                 return sendProperMediaGroup(chatId, notification.mediaAttachments, markdownContent, plainContent)
             }
             
@@ -250,9 +250,10 @@ class NotificationProcessor(
             return false
         }
     }
-
+    
     /**
-     * Send proper Telegram media group (album) - appears as ONE message with multiple media
+     * FIXED: Send proper Telegram media group (album) - appears as ONE message with multiple media
+     * Now properly handles documents and other media types
      */
     private suspend fun sendProperMediaGroup(
         chatId: String,
@@ -263,38 +264,92 @@ class NotificationProcessor(
         try {
             logger.debug { "Sending proper media group with ${attachments.size} attachments" }
             
-            // Filter attachments that can be in media groups (photos and videos only)
-            val groupableAttachments = attachments.filter { 
-                it.type == MediaType.PHOTO || it.type == MediaType.VIDEO 
-            }
-            val otherAttachments = attachments.filter { 
-                it.type != MediaType.PHOTO && it.type != MediaType.VIDEO 
-            }
+            // FIXED: Check if all attachments are of the same type and can be grouped
+            val attachmentTypes = attachments.map { it.type }.distinct()
             
-            var mainGroupSent = false
-            
-            // Send the main media group (photos + videos)
-            if (groupableAttachments.isNotEmpty()) {
-                mainGroupSent = sendTelegramMediaGroup(chatId, groupableAttachments, markdownContent, plainContent)
-            }
-            
-            // Send other attachment types individually (documents, audio, etc.)
-            var othersSent = 0
-            for (attachment in otherAttachments) {
-                try {
-                    // Don't add caption to these - caption was already on the main group
-                    val sent = sendMediaAttachment(chatId, attachment, null, null)
-                    if (sent) othersSent++
-                    delay(300) // Small delay between different types
-                } catch (e: Exception) {
-                    logger.warn(e) { "Failed to send ${attachment.type} attachment" }
+            when {
+                // Case 1: Mixed types - send photos/videos as group, others individually
+                attachmentTypes.size > 1 -> {
+                    val groupableAttachments = attachments.filter { 
+                        it.type == MediaType.PHOTO || it.type == MediaType.VIDEO 
+                    }
+                    val otherAttachments = attachments.filter { 
+                        it.type != MediaType.PHOTO && it.type != MediaType.VIDEO 
+                    }
+                    
+                    var mainGroupSent = false
+                    
+                    // Send the main media group (photos + videos) if any
+                    if (groupableAttachments.isNotEmpty()) {
+                        mainGroupSent = sendTelegramMediaGroup(chatId, groupableAttachments, markdownContent, plainContent)
+                    }
+                    
+                    // Send other attachment types individually
+                    var othersSent = 0
+                    for (attachment in otherAttachments) {
+                        try {
+                            // Only add caption to first other attachment if no main group was sent
+                            val shouldAddCaption = !mainGroupSent && othersSent == 0
+                            val sent = sendMediaAttachment(
+                                chatId, 
+                                attachment, 
+                                if (shouldAddCaption) markdownContent else null,
+                                if (shouldAddCaption) plainContent else null
+                            )
+                            if (sent) othersSent++
+                            delay(300) // Small delay between different types
+                        } catch (e: Exception) {
+                            logger.warn(e) { "Failed to send ${attachment.type} attachment" }
+                        }
+                    }
+                    
+                    val totalSuccess = (if (mainGroupSent) 1 else 0) + othersSent
+                    logger.info { "Mixed media group result: main group=${if (mainGroupSent) "✅" else "❌"}, others=$othersSent/${otherAttachments.size}" }
+                    
+                    return totalSuccess > 0
+                }
+                
+                // Case 2: All same type - try to send as media group if supported
+                attachmentTypes.size == 1 -> {
+                    val singleType = attachmentTypes.first()
+                    
+                    when (singleType) {
+                        MediaType.PHOTO, MediaType.VIDEO -> {
+                            // Photos and videos can always be grouped
+                            return sendTelegramMediaGroup(chatId, attachments, markdownContent, plainContent)
+                        }
+                        
+                        MediaType.DOCUMENT -> {
+                            // FIXED: Try to send documents as a group first, fallback to individual
+                            logger.debug { "Attempting to send ${attachments.size} documents as media group" }
+                            
+                            try {
+                                // Attempt to send documents as media group
+                                val success = sendTelegramDocumentGroup(chatId, attachments, markdownContent, plainContent)
+                                if (success) {
+                                    logger.info { "✅ Successfully sent ${attachments.size} documents as media group" }
+                                    return true
+                                }
+                            } catch (e: Exception) {
+                                logger.debug(e) { "Document media group failed, falling back to individual sends" }
+                            }
+                            
+                            // Fallback: Send documents individually
+                            return sendDocumentsIndividually(chatId, attachments, markdownContent, plainContent)
+                        }
+                        
+                        else -> {
+                            // Audio, voice, animation - send individually with caption on first
+                            return sendMediaIndividually(chatId, attachments, markdownContent, plainContent)
+                        }
+                    }
+                }
+                
+                else -> {
+                    logger.warn { "No attachments to send in media group" }
+                    return false
                 }
             }
-            
-            val totalSuccess = (if (mainGroupSent) 1 else 0) + othersSent
-            logger.info { "Media group result: main group=${if (mainGroupSent) "✅" else "❌"}, others=$othersSent/${otherAttachments.size}" }
-            
-            return totalSuccess > 0
             
         } catch (e: Exception) {
             logger.error(e) { "Error in sendProperMediaGroup" }
@@ -303,7 +358,200 @@ class NotificationProcessor(
     }
 
     /**
-     * Send Telegram media group using correct API v9.x
+     * NEW: Try to send documents as a Telegram media group
+     * Note: Telegram supports document media groups, but with limitations
+     */
+    private suspend fun sendTelegramDocumentGroup(
+        chatId: String,
+        attachments: List<MediaAttachment>,
+        markdownContent: String?,
+        plainContent: String?
+    ): Boolean {
+        try {
+            // Create media list with InputMediaDocument objects
+            val mediaList = mutableListOf<InputMedia>()
+            
+            for (i in attachments.indices) {
+                val attachment = attachments[i]
+                val file = File(attachment.filePath)
+                
+                if (!file.exists()) {
+                    logger.warn { "Media file not found: ${attachment.filePath}" }
+                    continue
+                }
+                
+                // Only first item gets caption
+                val caption = if (i == 0) markdownContent else null
+                val parseMode = if (i == 0 && !markdownContent.isNullOrBlank()) "MarkdownV2" else null
+                
+                val documentBuilder = InputMediaDocument.builder()
+                    .media(file, attachment.actualFileName)
+                
+                if (caption != null) {
+                    documentBuilder.caption(caption)
+                }
+                if (parseMode != null) {
+                    documentBuilder.parseMode(parseMode)
+                }
+                
+                mediaList.add(documentBuilder.build())
+            }
+            
+            if (mediaList.isEmpty()) {
+                logger.warn { "No valid documents for media group" }
+                return false
+            }
+            
+            // Create the sendMediaGroup request
+            val sendMediaGroup = SendMediaGroup(chatId, mediaList)
+            
+            // Try to send with MarkdownV2 first
+            return try {
+                withTimeout(uploadTimeoutMs) {
+                    withContext(Dispatchers.IO) {
+                        telegramClient.execute(sendMediaGroup)
+                    }
+                }
+                
+                logger.info { "✅ Sent document media group with ${mediaList.size} items (MarkdownV2)" }
+                markdownSuccess++
+                true
+                
+            } catch (e: TelegramApiException) {
+                if (isFormattingError(e)) {
+                    logger.debug { "MarkdownV2 failed for document group, retrying with plain text" }
+                    
+                    // Recreate with plain text
+                    val plainMediaList = mutableListOf<InputMedia>()
+                    
+                    for (i in attachments.indices) {
+                        val attachment = attachments[i]
+                        val file = File(attachment.filePath)
+                        if (!file.exists()) continue
+                        
+                        val caption = if (i == 0) plainContent else null
+                        
+                        val documentBuilder = InputMediaDocument.builder()
+                            .media(file, attachment.actualFileName)
+                        
+                        if (caption != null) {
+                            documentBuilder.caption(caption)
+                        }
+                        
+                        plainMediaList.add(documentBuilder.build())
+                    }
+                    
+                    val plainSendMediaGroup = SendMediaGroup(chatId, plainMediaList)
+                    
+                    withTimeout(uploadTimeoutMs) {
+                        withContext(Dispatchers.IO) {
+                            telegramClient.execute(plainSendMediaGroup)
+                        }
+                    }
+                    
+                    logger.info { "✅ Sent document media group with ${plainMediaList.size} items (plain text)" }
+                    plainFallback++
+                    true
+                    
+                } else {
+                    throw e
+                }
+            }
+            
+        } catch (e: Exception) {
+            logger.warn(e) { "Failed to send document media group: ${e.message}" }
+            return false
+        }
+    }
+
+    /**
+     * NEW: Send documents individually as fallback
+     */
+    private suspend fun sendDocumentsIndividually(
+        chatId: String,
+        attachments: List<MediaAttachment>,
+        markdownContent: String?,
+        plainContent: String?
+    ): Boolean {
+        logger.info { "Sending ${attachments.size} documents individually" }
+        
+        var successCount = 0
+        
+        for (i in attachments.indices) {
+            val attachment = attachments[i]
+            
+            try {
+                // Only first document gets caption
+                val shouldAddCaption = i == 0
+                val sent = sendMediaAttachment(
+                    chatId,
+                    attachment,
+                    if (shouldAddCaption) markdownContent else null,
+                    if (shouldAddCaption) plainContent else null
+                )
+                
+                if (sent) {
+                    successCount++
+                    logger.debug { "✅ Sent individual document ${i + 1}/${attachments.size}: ${attachment.actualFileName}" }
+                }
+                
+                // Small delay between documents
+                if (i < attachments.size - 1) {
+                    delay(500)
+                }
+                
+            } catch (e: Exception) {
+                logger.warn(e) { "Failed to send document ${i + 1}/${attachments.size}: ${attachment.actualFileName}" }
+            }
+        }
+        
+        logger.info { "Individual documents result: $successCount/${attachments.size} sent successfully" }
+        return successCount > 0
+    }
+
+    /**
+     * NEW: Send other media types individually
+     */
+    private suspend fun sendMediaIndividually(
+        chatId: String,
+        attachments: List<MediaAttachment>,
+        markdownContent: String?,
+        plainContent: String?
+    ): Boolean {
+        logger.debug { "Sending ${attachments.size} ${attachments.first().type} attachments individually" }
+        
+        var successCount = 0
+        
+        for (i in attachments.indices) {
+            val attachment = attachments[i]
+            
+            try {
+                // Only first item gets caption
+                val shouldAddCaption = i == 0
+                val sent = sendMediaAttachment(
+                    chatId,
+                    attachment,
+                    if (shouldAddCaption) markdownContent else null,
+                    if (shouldAddCaption) plainContent else null
+                )
+                
+                if (sent) successCount++
+                
+                // Small delay between items
+                if (i < attachments.size - 1) {
+                    delay(300)
+                }
+                
+            } catch (e: Exception) {
+                logger.warn(e) { "Failed to send ${attachment.type} attachment: ${attachment.actualFileName}" }
+            }
+        }
+        
+        return successCount > 0
+    }
+
+    /**
+     * Send Telegram media group using correct API v9.x (for photos/videos)
      */
     private suspend fun sendTelegramMediaGroup(
         chatId: String,
@@ -357,7 +605,7 @@ class NotificationProcessor(
                         attachment.height?.let { videoBuilder.height(it) }
                         attachment.duration?.let { videoBuilder.duration(it) }
                         
-                        // NEW: Add thumbnail for media group videos
+                        // Add thumbnail for media group videos
                         attachment.thumbnailPath?.let { thumbPath ->
                             val thumbnailFile = File(thumbPath)
                             if (thumbnailFile.exists()) {
@@ -431,7 +679,7 @@ class NotificationProcessor(
                                 attachment.height?.let { videoBuilder.height(it) }
                                 attachment.duration?.let { videoBuilder.duration(it) }
                                 
-                                // NEW: Add thumbnail for plain text media group too
+                                // Add thumbnail for plain text media group too
                                 attachment.thumbnailPath?.let { thumbPath ->
                                     val thumbnailFile = File(thumbPath)
                                     if (thumbnailFile.exists()) {
@@ -595,7 +843,7 @@ class NotificationProcessor(
                     attachment.height?.let { height(it) }
                     attachment.duration?.let { duration(it) }
                     
-                    // NEW: Add thumbnail if available
+                    // Add thumbnail if available
                     attachment.thumbnailPath?.let { thumbPath ->
                         val thumbnailFile = File(thumbPath)
                         if (thumbnailFile.exists()) {
@@ -628,7 +876,7 @@ class NotificationProcessor(
                     attachment.height?.let { height(it) }
                     attachment.duration?.let { duration(it) }
                     
-                    // NEW: Add thumbnail if available
+                    // Add thumbnail if available
                     attachment.thumbnailPath?.let { thumbPath ->
                         val thumbnailFile = File(thumbPath)
                         if (thumbnailFile.exists()) {
@@ -666,7 +914,7 @@ class NotificationProcessor(
                     attachment.height?.let { height(it) }
                     attachment.duration?.let { duration(it) }
                     
-                    // NEW: Add thumbnail for animations if available
+                    // Add thumbnail for animations if available
                     attachment.thumbnailPath?.let { thumbPath ->
                         val thumbnailFile = File(thumbPath)
                         if (thumbnailFile.exists()) {
@@ -699,7 +947,7 @@ class NotificationProcessor(
                     attachment.height?.let { height(it) }
                     attachment.duration?.let { duration(it) }
                     
-                    // NEW: Add thumbnail for animations if available
+                    // Add thumbnail for animations if available
                     attachment.thumbnailPath?.let { thumbPath ->
                         val thumbnailFile = File(thumbPath)
                         if (thumbnailFile.exists()) {
@@ -777,7 +1025,7 @@ class NotificationProcessor(
                 .parseMode("MarkdownV2")
                 .apply { 
                     attachment.duration?.let { duration(it) }
-                    // FIXED: Add original metadata from TDLib for proper music display
+                    // Add original metadata from TDLib for proper music display
                     attachment.performer?.let { performer(it) }
                     attachment.title?.let { title(it) }
                 }
@@ -802,7 +1050,7 @@ class NotificationProcessor(
                 .apply { 
                     if (!content.isNullOrBlank()) caption(content)
                     attachment.duration?.let { duration(it) }
-                    // FIXED: Add original metadata from TDLib for proper music display
+                    // Add original metadata from TDLib for proper music display
                     attachment.performer?.let { performer(it) }
                     attachment.title?.let { title(it) }
                 }
