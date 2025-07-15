@@ -30,8 +30,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.*
 
 /**
- * FIXED NotificationProcessor with proper filename handling
- * Now correctly uses actualFileName for all media uploads
+ * UPDATED NotificationProcessor with video thumbnail support
+ * Now correctly sends videos with thumbnails for proper previews
  */
 class NotificationProcessor(
     private val database: Database,
@@ -220,7 +220,7 @@ class NotificationProcessor(
         
         // NO MEDIA CLEANUP - TDLib manages its own files
     }
-
+    
     /**
      * Send notification with media attachments using proper Telegram media group
      */
@@ -331,7 +331,7 @@ class NotificationProcessor(
                 val media = when (attachment.type) {
                     MediaType.PHOTO -> {
                         val photoBuilder = InputMediaPhoto.builder()
-                            .media(file, attachment.actualFileName) // FIXED: Use actualFileName
+                            .media(file, attachment.actualFileName)
                         
                         if (caption != null) {
                             photoBuilder.caption(caption)
@@ -345,7 +345,7 @@ class NotificationProcessor(
                     
                     MediaType.VIDEO -> {
                         val videoBuilder = InputMediaVideo.builder()
-                            .media(file, attachment.actualFileName) // FIXED: Use actualFileName
+                            .media(file, attachment.actualFileName)
                         
                         if (caption != null) {
                             videoBuilder.caption(caption)
@@ -356,6 +356,15 @@ class NotificationProcessor(
                         attachment.width?.let { videoBuilder.width(it) }
                         attachment.height?.let { videoBuilder.height(it) }
                         attachment.duration?.let { videoBuilder.duration(it) }
+                        
+                        // NEW: Add thumbnail for media group videos
+                        attachment.thumbnailPath?.let { thumbPath ->
+                            val thumbnailFile = File(thumbPath)
+                            if (thumbnailFile.exists()) {
+                                logger.debug { "Using video thumbnail in media group: $thumbPath" }
+                                videoBuilder.thumbnail(InputFile(thumbnailFile))
+                            }
+                        }
                         
                         videoBuilder.build()
                     }
@@ -403,7 +412,7 @@ class NotificationProcessor(
                         val media = when (attachment.type) {
                             MediaType.PHOTO -> {
                                 val photoBuilder = InputMediaPhoto.builder()
-                                    .media(file, attachment.actualFileName) // FIXED: Use actualFileName
+                                    .media(file, attachment.actualFileName)
                                 
                                 if (caption != null) {
                                     photoBuilder.caption(caption)
@@ -413,7 +422,7 @@ class NotificationProcessor(
                             }
                             MediaType.VIDEO -> {
                                 val videoBuilder = InputMediaVideo.builder()
-                                    .media(file, attachment.actualFileName) // FIXED: Use actualFileName
+                                    .media(file, attachment.actualFileName)
                                 
                                 if (caption != null) {
                                     videoBuilder.caption(caption)
@@ -421,6 +430,15 @@ class NotificationProcessor(
                                 attachment.width?.let { videoBuilder.width(it) }
                                 attachment.height?.let { videoBuilder.height(it) }
                                 attachment.duration?.let { videoBuilder.duration(it) }
+                                
+                                // NEW: Add thumbnail for plain text media group too
+                                attachment.thumbnailPath?.let { thumbPath ->
+                                    val thumbnailFile = File(thumbPath)
+                                    if (thumbnailFile.exists()) {
+                                        logger.debug { "Using video thumbnail in plain media group: $thumbPath" }
+                                        videoBuilder.thumbnail(InputFile(thumbnailFile))
+                                    }
+                                }
                                 
                                 videoBuilder.build()
                             }
@@ -456,8 +474,7 @@ class NotificationProcessor(
     }
     
     /**
-     * Send individual media attachment with configurable timeout
-     * FIXED: Now uses actualFileName for all media types
+     * Send individual media attachment with thumbnails support
      */
     private suspend fun sendMediaAttachment(
         chatId: String,
@@ -472,7 +489,7 @@ class NotificationProcessor(
                 return false
             }
             
-            // FIXED: Create InputFile with proper filename
+            // Create InputFile with proper filename
             val inputFile = InputFile(file, attachment.actualFileName)
             
             // Try MarkdownV2 first, then fallback to plain text
@@ -563,7 +580,7 @@ class NotificationProcessor(
         }
     }
     
-    // Video sending methods
+    // Video sending methods with thumbnail support
     private suspend fun tryMarkdownVideo(chatId: String, video: InputFile, content: String?, attachment: MediaAttachment): Boolean {
         if (content.isNullOrBlank()) return false
         
@@ -577,6 +594,15 @@ class NotificationProcessor(
                     attachment.width?.let { width(it) }
                     attachment.height?.let { height(it) }
                     attachment.duration?.let { duration(it) }
+                    
+                    // NEW: Add thumbnail if available
+                    attachment.thumbnailPath?.let { thumbPath ->
+                        val thumbnailFile = File(thumbPath)
+                        if (thumbnailFile.exists()) {
+                            logger.debug { "Using video thumbnail: $thumbPath" }
+                            thumbnail(InputFile(thumbnailFile))
+                        }
+                    }
                 }
                 .build()
             
@@ -601,6 +627,15 @@ class NotificationProcessor(
                     attachment.width?.let { width(it) }
                     attachment.height?.let { height(it) }
                     attachment.duration?.let { duration(it) }
+                    
+                    // NEW: Add thumbnail if available
+                    attachment.thumbnailPath?.let { thumbPath ->
+                        val thumbnailFile = File(thumbPath)
+                        if (thumbnailFile.exists()) {
+                            logger.debug { "Using video thumbnail: $thumbPath" }
+                            thumbnail(InputFile(thumbnailFile))
+                        }
+                    }
                 }
                 .build()
             
@@ -616,7 +651,7 @@ class NotificationProcessor(
         }
     }
     
-    // Animation sending methods
+    // Animation sending methods with thumbnail support
     private suspend fun tryMarkdownAnimation(chatId: String, animation: InputFile, content: String?, attachment: MediaAttachment): Boolean {
         if (content.isNullOrBlank()) return false
         
@@ -630,6 +665,15 @@ class NotificationProcessor(
                     attachment.width?.let { width(it) }
                     attachment.height?.let { height(it) }
                     attachment.duration?.let { duration(it) }
+                    
+                    // NEW: Add thumbnail for animations if available
+                    attachment.thumbnailPath?.let { thumbPath ->
+                        val thumbnailFile = File(thumbPath)
+                        if (thumbnailFile.exists()) {
+                            logger.debug { "Using animation thumbnail: $thumbPath" }
+                            thumbnail(InputFile(thumbnailFile))
+                        }
+                    }
                 }
                 .build()
             
@@ -654,6 +698,15 @@ class NotificationProcessor(
                     attachment.width?.let { width(it) }
                     attachment.height?.let { height(it) }
                     attachment.duration?.let { duration(it) }
+                    
+                    // NEW: Add thumbnail for animations if available
+                    attachment.thumbnailPath?.let { thumbPath ->
+                        val thumbnailFile = File(thumbPath)
+                        if (thumbnailFile.exists()) {
+                            logger.debug { "Using animation thumbnail: $thumbPath" }
+                            thumbnail(InputFile(thumbnailFile))
+                        }
+                    }
                 }
                 .build()
             
@@ -712,7 +765,7 @@ class NotificationProcessor(
         }
     }
     
-    // Audio sending methods
+    // Audio sending methods with metadata support
     private suspend fun tryMarkdownAudio(chatId: String, audio: InputFile, content: String?, attachment: MediaAttachment): Boolean {
         if (content.isNullOrBlank()) return false
         

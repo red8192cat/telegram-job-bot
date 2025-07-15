@@ -12,7 +12,7 @@ import java.util.*
 
 /**
  * Downloads media attachments from TDLib messages
- * FIXED: Uses filesystem names for uniqueness, preserves music metadata
+ * UPDATED: Now downloads video thumbnails for proper previews
  */
 class MediaDownloader {
     private val logger = getLogger("MediaDownloader")
@@ -110,7 +110,7 @@ class MediaDownloader {
             return null
         }
         
-        // FIXED: Simple and correct logic for display filename
+        // Simple and correct logic for display filename
         val originalFileName = when {
             // If we have both artist and title, show as music (no extension) - matches Telegram
             !audio.title.isNullOrBlank() && !audio.performer.isNullOrBlank() -> 
@@ -146,7 +146,7 @@ class MediaDownloader {
                 mimeType = audio.mimeType,
                 caption = caption,
                 duration = audio.duration,
-                // FIXED: Pass the original metadata from TDLib
+                // Pass the original metadata from TDLib
                 performer = audio.performer?.takeIf { it.isNotBlank() },  // Only if not empty
                 title = audio.title?.takeIf { it.isNotBlank() }           // Only if not empty
             )
@@ -170,7 +170,7 @@ class MediaDownloader {
         val filePath = downloadFile(client, photoSize.photo.id)
         
         return if (filePath != null) {
-            // FIXED: Just use the actual filename from filesystem
+            // Use the actual filename from filesystem
             val actualFilename = File(filePath).name
             
             MediaAttachment(
@@ -201,7 +201,7 @@ class MediaDownloader {
         val filePath = downloadFile(client, video.video.id)
         
         return if (filePath != null) {
-            // FIXED: Use TDLib filename if available, otherwise filesystem name
+            // Use TDLib filename if available, otherwise filesystem name
             val originalFileName = when {
                 !video.fileName.isNullOrBlank() && !video.fileName.startsWith("tmp") -> 
                     video.fileName // Use TDLib filename if meaningful
@@ -209,8 +209,24 @@ class MediaDownloader {
                     File(filePath).name // Use actual filesystem name (e.g., "5447242562647651938.mp4")
             }
             
+            // NEW: Download thumbnail if available
+            val thumbnailPath = video.thumbnail?.let { thumbnail ->
+                try {
+                    logger.debug { "Downloading video thumbnail: fileId=${thumbnail.file.id}, format=${thumbnail.format.javaClass.simpleName}" }
+                    downloadFile(client, thumbnail.file.id)
+                } catch (e: Exception) {
+                    logger.debug(e) { "Failed to download video thumbnail" }
+                    null
+                }
+            }
+            
             logger.debug { "Video metadata - fileName: '${video.fileName}'" }
             logger.debug { "Using filename: '$originalFileName'" }
+            if (thumbnailPath != null) {
+                logger.debug { "Downloaded thumbnail: $thumbnailPath" }
+            } else {
+                logger.debug { "No thumbnail available for video" }
+            }
             
             MediaAttachment(
                 type = MediaType.VIDEO,
@@ -221,7 +237,8 @@ class MediaDownloader {
                 caption = caption,
                 width = video.width,
                 height = video.height,
-                duration = video.duration
+                duration = video.duration,
+                thumbnailPath = thumbnailPath // NEW: Include thumbnail path
             )
         } else null
     }
@@ -241,7 +258,7 @@ class MediaDownloader {
         val filePath = downloadFile(client, document.document.id)
         
         return if (filePath != null) {
-            // FIXED: Use TDLib filename if available, otherwise filesystem name
+            // Use TDLib filename if available, otherwise filesystem name
             val originalFileName = when {
                 !document.fileName.isNullOrBlank() && !document.fileName.startsWith("tmp") -> 
                     document.fileName // Use TDLib filename if meaningful
@@ -305,7 +322,7 @@ class MediaDownloader {
         val filePath = downloadFile(client, animation.animation.id)
         
         return if (filePath != null) {
-            // FIXED: Use TDLib filename if available, otherwise filesystem name  
+            // Use TDLib filename if available, otherwise filesystem name  
             val originalFileName = when {
                 !animation.fileName.isNullOrBlank() && !animation.fileName.startsWith("tmp") -> 
                     animation.fileName // Use TDLib filename if meaningful
@@ -313,8 +330,22 @@ class MediaDownloader {
                     File(filePath).name // Use actual filesystem name
             }
             
+            // NEW: Download thumbnail if available (animations can have thumbnails too)
+            val thumbnailPath = animation.thumbnail?.let { thumbnail ->
+                try {
+                    logger.debug { "Downloading animation thumbnail: fileId=${thumbnail.file.id}" }
+                    downloadFile(client, thumbnail.file.id)
+                } catch (e: Exception) {
+                    logger.debug(e) { "Failed to download animation thumbnail" }
+                    null
+                }
+            }
+            
             logger.debug { "Animation metadata - fileName: '${animation.fileName}'" }
             logger.debug { "Using filename: '$originalFileName'" }
+            if (thumbnailPath != null) {
+                logger.debug { "Downloaded animation thumbnail: $thumbnailPath" }
+            }
             
             MediaAttachment(
                 type = MediaType.ANIMATION,
@@ -325,7 +356,8 @@ class MediaDownloader {
                 caption = caption,
                 width = animation.width,
                 height = animation.height,
-                duration = animation.duration
+                duration = animation.duration,
+                thumbnailPath = thumbnailPath // NEW: Include thumbnail path for animations too
             )
         } else null
     }
